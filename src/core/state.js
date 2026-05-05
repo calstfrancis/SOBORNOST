@@ -15,21 +15,23 @@ export const G = {
   beliefs: new Set(), knowledge: new Set(),
   consequenceQueue: [], npcStance: {}, eventQueue: [],
   pastLifeFlags: new Set(), _kenosisProgress: 0,
-  liturgicalHour: 4, metaUnlocks: {}, _idleTimer: null, _analyticsLog: [],
+  liturgicalHour: 4, metaUnlocks: {}, _analyticsLog: [],
   companions: [], theosis: 0, _theosisFlashTimer: null,
-  // Upgrade 6: active dialogue state
   _dialogue: null,
-  // Upgrade 4: theosis reflection journal
   journal: [],
-  // Upgrade 7: typed event log (rolling, in-session only)
   eventLog: [],
-  // Upgrade 5: scene counter for delay_scenes consequences
   _sceneCount: 0,
-  // Upgrade 9: active cover challenge state
   _coverChallenge: null,
 };
 
 export function resetG(preserve = {}) {
+  // Bug 9 fix: cancel any pending theosis flash before nulling the reference,
+  // otherwise the timer callback fires against the freshly-reset G state.
+  if (G._theosisFlashTimer) {
+    clearTimeout(G._theosisFlashTimer);
+    G._theosisFlashTimer = null;
+  }
+
   G.phase = 'title'; G.mode = 'attended';
   G.stats = { vigilance: 0, composure: 0, communion: 0, doubt: 0 };
   G.charisms = [];
@@ -45,8 +47,8 @@ export function resetG(preserve = {}) {
   G.beliefs = new Set(); G.knowledge = new Set();
   G.consequenceQueue = []; G.npcStance = {}; G.eventQueue = [];
   G.pastLifeFlags = new Set(); G._kenosisProgress = 0;
-  G.liturgicalHour = 4; G.metaUnlocks = {}; G._idleTimer = null; G._analyticsLog = [];
-  G.companions = []; G.theosis = 0; G._theosisFlashTimer = null;
+  G.liturgicalHour = 4; G.metaUnlocks = {}; G._analyticsLog = [];
+  G.companions = []; G.theosis = 0;
   G._dialogue = null;
   G.journal = [];
   G.eventLog = [];

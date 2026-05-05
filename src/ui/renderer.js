@@ -2,7 +2,7 @@
 
 import { G } from '../core/state.js';
 import { _registries, allCharisms, findCharism, noteLabel, getScene, getInitialScene } from '../systems/registries.js';
-import { setMood } from '../systems/atmosphere.js';
+import { setMood, refreshAtmosMods } from '../systems/atmosphere.js';
 import { _audioOn, toggleAudio } from '../systems/audio.js';
 import { LITURGICAL_HOURS } from '../systems/theosis.js';
 import { isRitualActive, renderRitual } from '../systems/rituals.js';
@@ -17,12 +17,11 @@ import { navigate, applyChoice, newPlay, openPanel, doRestart } from '../systems
 import { getUiOpacity, renderCoverMeter } from './widgets.js';
 import { setRenderFn } from '../systems/schedule.js';
 import { renderDialogue } from '../systems/dialogue.js';
-// Upgrade 4: journal
 import { renderJournalPanel } from '../systems/journal.js';
-// Upgrade 7: event log
 import { renderEventLogPanel } from '../systems/eventlog.js';
-// Upgrade 9: cover challenge
 import { renderCoverChallengeOverlay, startCoverChallenge, hasCoverChallenges, getRegisteredChallengeFields } from '../systems/cover.js';
+// Bug 10 fix: emit is now a static import used directly in beginGame
+import { emit } from '../core/events.js';
 
 setRenderFn(render);
 
@@ -91,16 +90,23 @@ function _stub(root, name) {
   d.innerHTML = `<p style="padding:2rem;color:var(--amber)">${name} \u2014 port from your v3.1 source</p>`;
   root.appendChild(d);
 }
+
 export function dismissTutorial() { G.tutorialDone = true; saveGameLegacy(); render(); }
+
 export function beginGame() {
   if (!G.charisms.length) return;
   G.charisms.forEach(id => addNote('charism_' + id));
-  G.phase = 'game'; G.scene = getInitialScene();
+  G.phase = 'game';
+  G.scene = getInitialScene();
   if (!G.scene) console.error('[SOBORNOST] No initial scene set — call SOBORNOST.setInitialScene()');
   G.mode = 'open';
-  import('../systems/atmosphere.js').then(({ refreshAtmosMods }) => refreshAtmosMods());
+  // Bug 10 fix: both atmosphere.js and events.js are statically imported.
+  // Dynamic imports here were pointless and caused emit('gameStarted') to fire
+  // asynchronously — after render() returned — meaning any gameStarted listener
+  // that set G state (flags, quests, theosis) would miss the first render.
+  refreshAtmosMods();
   render();
-  import('../core/events.js').then(({ emit }) => emit('gameStarted'));
+  emit('gameStarted');
 }
 
 // ── Tutorial ──────────────────────────────────────────────────
@@ -165,17 +171,14 @@ export function renderGame(root) {
   if (G.rollResult && G.pendingRoll) { _renderRollBox(root); return; }
   if (isRitualActive()) { renderRitual(root); return; }
 
-  // Upgrade 9: cover challenge takes over the scene if active
   if (G._coverChallenge) {
     const scene = getScene(G.scene);
     if (scene) {
-      // Render scene header for context, then overlay challenge
       const wrap = document.createElement('div'); wrap.className = 'game';
-      const hdr  = _buildHeader(scene); wrap.appendChild(hdr);
+      wrap.appendChild(_buildHeader(scene));
       const body = document.createElement('div'); body.className = 'game-body';
       renderCoverChallengeOverlay(body, processText);
-      body.appendChild(_buildRestartBar());
-      wrap.appendChild(body); root.appendChild(wrap);
+      body.appendChild(_buildRestartBar()); wrap.appendChild(body); root.appendChild(wrap);
     } else {
       renderCoverChallengeOverlay(root, processText);
     }
@@ -205,12 +208,11 @@ export function renderGame(root) {
 
   const wrap = document.createElement('div'); wrap.className = 'game';
   const uiOp = getUiOpacity(); if (uiOp < 1) wrap.style.opacity = uiOp;
-
   wrap.appendChild(_buildHeader(scene));
 
   const body = document.createElement('div'); body.className = 'game-body';
   if (scene.art && _registries.art[scene.art]) {
-    const art = document.createElement('pre'); art.className='art-block'; art.textContent=_registries.art[scene.art]; body.appendChild(art);
+    const art=document.createElement('pre');art.className='art-block';art.textContent=_registries.art[scene.art];body.appendChild(art);
   }
   if (G.lastReaction) {
     const rp=document.createElement('p');rp.className='sp sp-reaction';rp.textContent=G.lastReaction;body.appendChild(rp);G.lastReaction=null;
@@ -238,7 +240,6 @@ export function renderGame(root) {
   });
   body.appendChild(stxt);
 
-  // Dialogue overlay — replaces choice list if active
   if (G._dialogue) {
     renderDialogue(body, processText);
     body.appendChild(_buildRestartBar()); wrap.appendChild(body); root.appendChild(wrap);
@@ -246,7 +247,6 @@ export function renderGame(root) {
     return;
   }
 
-  // Choices
   const cd = document.createElement('div'); cd.className='choices';
   if (scene.return_to) {
     const rb=document.createElement('button');rb.className='choice choice-return';rb.textContent=scene.return_label||'Return.';rb.onclick=()=>navigate(scene.return_to);cd.appendChild(rb);
@@ -297,7 +297,6 @@ export function renderGame(root) {
   }
   body.appendChild(cd);
 
-  // Observations
   if (G.notes.length) {
     const od=document.createElement('div');od.className='obs-section';
     const ot=document.createElement('div');ot.className='obs-title';ot.textContent='observations';od.appendChild(ot);
@@ -314,20 +313,16 @@ export function renderGame(root) {
   body.appendChild(_buildRestartBar()); wrap.appendChild(body); root.appendChild(wrap);
   _appendAudioBtn(root); _appendBottomNav(root);
 
-  // Panels
   if(G.panelOpen==='notes')    _renderNotesPanel(root);
   if(G.panelOpen==='status')   _renderStatusPanel(root);
   if(G.panelOpen==='breviary') _renderBreviaryPanel(root);
   if(G.panelOpen==='glossary') _renderGlossaryPanel(root);
   if(G.panelOpen==='map')      _renderMapPanelSide(root);
-  // Upgrade 4: journal panel
   if(G.panelOpen==='journal')  renderJournalPanel(root, openPanel);
-  // Upgrade 7: event log panel
   if(G.panelOpen==='log')      renderEventLogPanel(root, openPanel);
 }
 
 // ── Shared UI helpers ─────────────────────────────────────────
-
 function _buildHeader(scene) {
   const hdr = document.createElement('div'); hdr.className='game-header';
   const si  = document.createElement('div'); si.className='save-indicator'; si.textContent='\u25e6 autosaved'; si.style.display='none'; hdr.appendChild(si);
@@ -374,25 +369,15 @@ function _appendAudioBtn(root) {
 function _appendBottomNav(root) {
   const bnav=document.createElement('div');bnav.id='bottom-nav';
   bnav.style.cssText='position:fixed;bottom:0;left:0;width:100%;z-index:100;display:flex;justify-content:center;background:rgba(6,8,12,0.96);border-top:1px solid var(--border)';
-
   const navItems = [
     { label:'observations', fn:()=>openPanel('notes') },
     { label:'status',       fn:()=>openPanel('status') },
-    { label:'breviary'+(G.soundings.available.length?' \u2691':''),
-      fn:()=>openPanel('breviary'),
-      cls:G.soundings.available.length?' has-available':'' },
+    { label:'breviary'+(G.soundings.available.length?' \u2691':''), fn:()=>openPanel('breviary'), cls:G.soundings.available.length?' has-available':'' },
     { label:'glossary',     fn:()=>openPanel('glossary') },
-    // Upgrade 4: journal tab (only if entries exist)
-    ...(G.journal&&G.journal.length
-      ? [{ label:'journal'+(G.journal.length?' \u2021':''), fn:()=>openPanel('journal') }]
-      : []),
-    // Upgrade 7: log tab (only in attended/open mode)
-    ...(G.mode!=='witnessed'
-      ? [{ label:'log', fn:()=>openPanel('log') }]
-      : []),
+    ...(G.journal&&G.journal.length ? [{ label:'journal', fn:()=>openPanel('journal') }] : []),
+    ...(G.mode!=='witnessed'        ? [{ label:'log',     fn:()=>openPanel('log')     }] : []),
     { label:'map',          fn:()=>openPanel('map') },
   ];
-
   navItems.forEach(({label,fn,cls=''})=>{
     const b=document.createElement('button');
     b.style.cssText="flex:1;background:none;border:none;border-right:1px solid var(--border);font-family:'Courier Prime',monospace;font-size:.66rem;letter-spacing:.07em;padding:.55rem .3rem;cursor:pointer;color:var(--dim)";

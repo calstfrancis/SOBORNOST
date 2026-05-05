@@ -1,37 +1,17 @@
 // ── SOBORNOST ENGINE — systems/journal.js ─────────────────────
 // Upgrade 4: Theosis Reflection Journal.
 //
-// Automatically records an entry at each registered theosis threshold
-// and at each crossing boundary (newPlay). Entries are persisted to
-// localStorage alongside save data and displayed in a new journal panel.
-//
-// ── Authoring ─────────────────────────────────────────────────
-//
-//   SOBORNOST.registerJournalEntry(33, 'The first fissure of light.');
-//   SOBORNOST.registerJournalEntry(66, 'The word begins to change.');
-//   SOBORNOST.registerJournalEntry(100, 'Nothing remains but the crossing itself.');
-//
-// Entries fire once per threshold per play (tracked by flag). If the
-// author does not register an entry for a threshold, a default line
-// is generated from the theosis value.
-//
-// ── Journal entry shape ───────────────────────────────────────
-//   {
-//     timestamp:  number,   // Date.now()
-//     crossing:   number,   // G.playCount at time of entry
-//     scene:      string,   // G.scene at time of entry
-//     theosis:    number,   // G.theosis at time of entry
-//     hour:       number,   // G.liturgicalHour at time of entry
-//     type:       'threshold' | 'crossing' | 'authored',
-//     text:       string,
-//   }
+// Bug 7 fix: journal is now stored per save-slot rather than under a
+// global key. saveJournal(slotId) and loadJournal(slotId) receive the
+// slot identifier from save.js. Two different slots no longer share or
+// overwrite each other's journal history.
 
 import { G } from '../core/state.js';
-import { on } from '../core/events.js';
 import { LITURGICAL_HOURS } from './theosis.js';
 
+const JOURNAL_KEY_PREFIX = 'sobornost_journal_';
+
 // ── Registered threshold entries ──────────────────────────────
-// Map<threshold:number, text:string>
 const _thresholdEntries = new Map();
 
 export function registerJournalEntry(threshold, text) {
@@ -43,7 +23,6 @@ export function registerJournalEntry(threshold, text) {
 }
 
 // ── Writing entries ───────────────────────────────────────────
-
 export function addJournalEntry(entry) {
   G.journal.push({
     timestamp:  Date.now(),
@@ -53,11 +32,9 @@ export function addJournalEntry(entry) {
     hour:       G.liturgicalHour,
     ...entry,
   });
-  // Cap at 200 entries — oldest drop off first
   if (G.journal.length > 200) G.journal.shift();
 }
 
-// Called by the theosis system on every theosis change
 export function checkJournalThresholds(newValue, oldValue) {
   for (const [threshold, text] of _thresholdEntries) {
     if (oldValue < threshold && newValue >= threshold) {
@@ -68,24 +45,19 @@ export function checkJournalThresholds(newValue, oldValue) {
       }
     }
   }
-  // Automatic entry if no authored text registered for any threshold just crossed
-  const crossedThresholds = [33, 66, 100].filter(
+  const autoThresholds = [33, 66, 100].filter(
     t => oldValue < t && newValue >= t && !_thresholdEntries.has(t)
   );
-  crossedThresholds.forEach(t => {
+  autoThresholds.forEach(t => {
     const flagKey = `__journal_auto_${t}_c${G.playCount}`;
     if (!G.flags.has(flagKey)) {
       G.flags.add(flagKey);
       const hourName = LITURGICAL_HOURS[G.liturgicalHour]?.name || 'the hour';
-      addJournalEntry({
-        type: 'threshold',
-        text: `Theosis ${t}. ${hourName}.`,
-      });
+      addJournalEntry({ type: 'threshold', text: `Theosis ${t}. ${hourName}.` });
     }
   });
 }
 
-// Called by newPlay() to mark crossing boundaries
 export function addCrossingEntry() {
   const hourName = LITURGICAL_HOURS[G.liturgicalHour]?.name || '';
   addJournalEntry({
@@ -94,31 +66,29 @@ export function addCrossingEntry() {
   });
 }
 
-// ── Persistence helpers (called by save.js) ───────────────────
-export const JOURNAL_KEY = 'sobornost_journal';
-
-export function saveJournal() {
-  try { localStorage.setItem(JOURNAL_KEY, JSON.stringify(G.journal)); } catch (e) {}
+// ── Persistence ───────────────────────────────────────────────
+// Bug 7 fix: accept slotId so each slot has its own journal key.
+export function saveJournal(slotId) {
+  try { localStorage.setItem(JOURNAL_KEY_PREFIX + slotId, JSON.stringify(G.journal)); } catch (e) {}
 }
 
-export function loadJournal() {
+export function loadJournal(slotId) {
   try {
-    const raw = localStorage.getItem(JOURNAL_KEY);
+    const raw = localStorage.getItem(JOURNAL_KEY_PREFIX + slotId);
     if (raw) G.journal = JSON.parse(raw);
+    else     G.journal = [];
   } catch (e) { G.journal = []; }
 }
 
 // ── Journal panel renderer ────────────────────────────────────
-
 export function renderJournalPanel(root, openPanelFn) {
   const overlay = document.createElement('div');
   overlay.className = 'panel-overlay';
   overlay.onclick = (e) => { if (e.target === overlay) openPanelFn(null); };
 
-  const panel = document.createElement('div');
-  panel.className = 'panel';
+  const panel = document.createElement('div'); panel.className = 'panel';
 
-  const hdr = document.createElement('div'); hdr.className = 'panel-header';
+  const hdr   = document.createElement('div'); hdr.className   = 'panel-header';
   const title = document.createElement('div'); title.className = 'panel-title';
   title.textContent = 'the journal';
   const close = document.createElement('button'); close.className = 'panel-close';
@@ -133,10 +103,8 @@ export function renderJournalPanel(root, openPanelFn) {
     empty.textContent = 'The journal is empty. It fills as you cross.';
     body.appendChild(empty);
   } else {
-    // Show most recent first, grouped by crossing
     const entries = [...G.journal].reverse();
     let lastCrossing = -1;
-
     entries.forEach(entry => {
       if (entry.crossing !== lastCrossing) {
         lastCrossing = entry.crossing;
@@ -145,20 +113,14 @@ export function renderJournalPanel(root, openPanelFn) {
         ch.textContent = entry.crossing === 0 ? 'First crossing' : `Crossing ${entry.crossing + 1}`;
         body.appendChild(ch);
       }
-
-      const row = document.createElement('div');
-      row.style.cssText = 'margin-bottom:.8rem';
-
-      const meta = document.createElement('div');
-      meta.style.cssText = 'font-size:.6rem;color:var(--dim);letter-spacing:.08em;margin-bottom:.15rem';
-      const hourName = LITURGICAL_HOURS[entry.hour]?.name || '';
+      const row  = document.createElement('div'); row.style.cssText  = 'margin-bottom:.8rem';
+      const meta = document.createElement('div'); meta.style.cssText = 'font-size:.6rem;color:var(--dim);letter-spacing:.08em;margin-bottom:.15rem';
+      const hourName  = LITURGICAL_HOURS[entry.hour]?.name || '';
       const theosisStr = entry.theosis !== undefined ? `\u25cf ${entry.theosis}` : '';
       meta.textContent = [hourName, theosisStr].filter(Boolean).join('  ');
-
       const text = document.createElement('p');
       text.style.cssText = 'font-size:.78rem;color:var(--fg);line-height:1.5;margin:0';
       text.textContent = entry.text;
-
       row.appendChild(meta); row.appendChild(text); body.appendChild(row);
     });
   }

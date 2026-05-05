@@ -15,27 +15,32 @@ import {
   setCover, degradeCover, modStance,
   learn, comeToBelieve, contradict,
   pushConsequence, scheduleEvent,
-  tickDelayedConsequences,      // Upgrade 5
-  fireNextChoiceConsequences,   // Upgrade 5
+  tickDelayedConsequences,
+  fireNextChoiceConsequences,
 } from './mechanics.js';
 import { addCompanion, removeCompanion } from './companions.js';
 import { incrementTheosis, flashTheosisLight, getTheosisTagValues } from './theosis.js';
 import { SAVE_KEY_PREFIX } from './save.js';
 import { checkEndings } from './endings.js';
 import { startDialogue } from './dialogue.js';
-// Upgrade 4: journal crossing entry
 import { addCrossingEntry } from './journal.js';
 
 export function navigate(id) {
-  G.scene = id;
-  G._sceneCount = (G._sceneCount || 0) + 1;  // Upgrade 5: used by delay_scenes
+  G.scene       = id;
+  G._sceneCount = (G._sceneCount || 0) + 1;
   markMapNodeVisited(id);
   G._poaAbsorbedThisScene = false;
   G._mortificationSpent   = false;
   G._dialogue             = null;
+  // Bug 5 fix: also clear cover challenge on scene change
+  G._coverChallenge       = null;
   tickSoundings();
-  tickDelayedConsequences();   // Upgrade 5: decrement and fire delay_scenes consequences
+  // Bug 4 fix: snapshot BEFORE firing delayed consequences.
+  // If a delay_scenes consequence redirects G.scene, the history stack should
+  // record the player's navigation target (id), not the consequence destination.
+  // Undo then correctly returns to the navigated scene, not the redirect.
   _captureSnapshot();
+  tickDelayedConsequences();
   window.scrollTo(0, 0);
   scheduleRender();
   emit('sceneChanged', id);
@@ -49,8 +54,10 @@ export function openPanel(w) {
 export function returnToTitle() { G.phase = 'title'; scheduleRender(); }
 
 export function applyChoice(ch) {
-  // Upgrade 5: fire on_next_choice consequences before this choice's effects
-  fireNextChoiceConsequences();
+  // Bug 6 fix: fireNextChoiceConsequences now returns true if a consequence
+  // changed G.scene. If so, we skip the choice's own navigation — the
+  // consequence's redirect takes precedence.
+  const consequenceRedirected = fireNextChoiceConsequences();
 
   // ── Theosis ───────────────────────────────────────────────
   if (ch.tags && Array.isArray(ch.tags)) {
@@ -108,13 +115,15 @@ export function applyChoice(ch) {
   if (ch.dialogue) { startDialogue(ch.dialogue); emit('choiceApplied', ch); return; }
 
   // ── Navigation ────────────────────────────────────────────
+  // Bug 6 fix: if an on_next_choice consequence already redirected the scene,
+  // skip the choice's own navigation so the consequence wins.
+  if (consequenceRedirected) { emit('choiceApplied', ch); return; }
   if (ch.next === '__new_play__') { newPlay(); return; }
   if (ch.next) navigate(ch.next);
   emit('choiceApplied', ch);
 }
 
 export function newPlay() {
-  // Upgrade 4: record crossing boundary in journal before resetting
   addCrossingEntry();
   const currentFlags = [...G.flags];
   const preserve = {
@@ -122,7 +131,6 @@ export function newPlay() {
     metaUnlocks: G.metaUnlocks,
     playCount:   G.playCount + 1,
     pastFlags:   currentFlags,
-    // Preserve journal across crossings
     journal:     G.journal,
   };
   resetG(preserve);
