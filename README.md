@@ -8,7 +8,7 @@ Built for games that involve spiritual practice, slow disclosure, contested iden
 
 ## Overview
 
-SOBORNOST is a complete game engine written as vanilla ES6 modules. The author registers scenes, charisms, soundings, and endings in a plain JavaScript data file. The engine handles rendering, audio, atmospherics, save/load, undo/redo, and all game mechanics. There is no compilation step and no package manager required.
+SOBORNOST is a complete game engine written as a single vanilla JavaScript file. The author registers scenes, charisms, soundings, and endings in a plain JavaScript data file. The engine handles rendering, audio, atmospherics, save/load, undo/redo, and all game mechanics. There is no compilation step and no package manager required.
 
 The name is the Russian theological term for conciliarity — the unity of many voices into one body. The engine was built to support a specific kind of contemplative, layered narrative game, but its systems are general enough for any text-heavy interactive fiction with RPG mechanics.
 
@@ -18,7 +18,7 @@ The name is the Russian theological term for conciliarity — the unity of many 
 
 ### Running locally
 
-ES6 modules cannot load from `file://` URLs. You need a local HTTP server:
+JavaScript modules cannot load from `file://` URLs. You need a local HTTP server:
 
 ```bash
 # Python (always available)
@@ -35,15 +35,9 @@ Open `http://localhost:3000`.
 ```
 your-game/
   index.html          ← your shell HTML
-  src/                ← engine source (do not edit)
-    index.js          ← engine entry point
-    core/
-    systems/
-    ui/
+  sobornost.js        ← the complete engine (do not edit)
   game/
     data.js           ← your scenes, charisms, endings
-  tools/
-    dev-server.js     ← optional hot-reload dev server
 ```
 
 ### HTML setup
@@ -60,13 +54,13 @@ your-game/
   <canvas id="atmos"></canvas>
   <div id="root"></div>
 
-  <script type="module" src="src/index.js"></script>
+  <script type="module" src="sobornost.js"></script>
   <script type="module" src="game/data.js"></script>
 </body>
 </html>
 ```
 
-The engine entry point must load before your data file. Both use `type="module"`.
+The engine file must load before your data file. Both use `type="module"`.
 
 ### Minimal data file
 
@@ -541,7 +535,7 @@ S.render();
 node tools/dev-server.js 3000
 ```
 
-Serves your game on port 3000, watches `game/` and `src/` for changes, and sends a WebSocket signal to the browser on save. Game data files hot-reload without a page refresh — `G` state is preserved. Engine file changes trigger a full page reload.
+Serves your game on port 3000, watches `game/` and `sobornost.js` for changes, and sends a WebSocket signal to the browser on save. Game data files hot-reload without a page refresh — `G` state is preserved. Engine file changes trigger a full page reload.
 
 In your data file:
 
@@ -582,49 +576,22 @@ Set via the mode selection screen, or programmatically: `G.mode = 'attended'`.
 
 ---
 
-## Module structure
+## Single file structure
+
+The `sobornost.js` file contains the complete engine in a single module. The sections are organized by dependency order:
 
 ```
-src/
-  core/
-    state.js         G object and resetG()
-    events.js        pub/sub event bus (on/off/emit)
-    debug.js         DEBUG flag and debugLog()
-
-  systems/
-    atmosphere.js    Canvas fog, porthole, mood lerp, gold glow
-    audio.js         Web Audio drones, SFX, mood-reactive ambient
-    companions.js    Companion CRUD and stat management
-    conditions.js    evaluateCondition(), isChoiceLocked()
-    cover.js         Cover challenge mini-game
-    devmode.js       Browser-side hot-reload WebSocket client
-    dialogue.js      Inline branching dialogue trees
-    endings.js       Authored ending conditions
-    eventlog.js      Typed in-session event log
-    history.js       Snapshot undo/redo
-    idle.js          Rumination timer
-    journal.js       Theosis reflection journal
-    mechanics.js     Flags, effects, items, time, reputation, stances, epistemic, consequences
-    navigation.js    navigate(), applyChoice(), newPlay()
-    registries.js    All registration functions and data stores
-    rituals.js       Ritual phase sequences and scene pools
-    roll.js          2d6 resolution with charism modifiers and advantage
-    save.js          Multi-slot localStorage, meta-achievements, analytics
-    schedule.js      Centralised render scheduler (scheduleRender)
-    soundings.js     Sounding take/settle/tick/release
-    text.js          Passage resolution, random lines, processText()
-    theosis.js       Theosis tiers, liturgical hours, name mapping
-    validate.js      Development-time scene validation
-
-  ui/
-    renderer.js      All render functions; panel system
-    widgets.js       Compass, progress trackers, cover meter, map
-
-  index.js           Entry point; window.SOBORNOST public API
-
-tools/
-  dev-server.js      Node.js HTTP + WebSocket dev server
+sobornost.js
+  debug → events → state → schedule → registries →
+  mechanics → conditions → soundings → theosis →
+  atmosphere → audio → history → save → journal →
+  companions → roll → rituals → navigation → ambient →
+  codex → cover → dialogue → endings → eventlog →
+  devmode → validate → text → idle → widgets → renderer →
+  public API
 ```
+
+The public API is exposed as `window.SOBORNOST` and includes all registration functions, state access, and rendering controls.
 
 ---
 
