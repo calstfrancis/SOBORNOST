@@ -128,7 +128,7 @@ function scheduleRender() {
   if (_scheduled) return;
   if (!_renderFn) { console.warn('[SOBORNOST] scheduleRender() called before renderer registered'); return; }
   _scheduled = true;
-  queueMicrotask(() => { _scheduled = false; _renderFn(); });
+  queueMicrotask(() => { _scheduled = false; _renderFn(); window.scrollTo({ top: 0, behavior: 'instant' }); });
 }
 
 
@@ -207,12 +207,20 @@ function setTutorialContent(contentHtml)      { _registries.tutorialContent = co
 // SECTION: systems/mechanics.js
 // ============================================================
 
-function showToast(msg, type) {
-  const old = document.querySelector('.note-toast'); if (old) old.remove();
+let _toastQueue = [], _toastActive = false;
+function showToast(msg, type='note') {
+  _toastQueue.push({ msg, type });
+  if (!_toastActive) _flushToast();
+}
+function _flushToast() {
+  if (!_toastQueue.length) { _toastActive = false; return; }
+  _toastActive = true;
+  const { msg, type } = _toastQueue.shift();
+  const old = document.querySelector('.toast'); if (old) old.remove();
   const t = document.createElement('div');
-  t.className = 'note-toast' + (type === 'sounding' ? ' sounding-toast' : '');
+  t.className = 'toast ' + (type || 'note');
   t.textContent = msg; document.body.appendChild(t);
-  setTimeout(() => { if (t.parentNode) t.remove(); }, 3200);
+  setTimeout(() => { if (t.parentNode) t.remove(); _flushToast(); }, 2600);
 }
 
 function hasFlag(f) { return G.flags.has(f); }
@@ -285,7 +293,7 @@ function recalculateHeldEffects() {
   }
 }
 function hasItem(id) { return G.inventory.includes(id); }
-function addItem(id) { if (!hasItem(id)) { G.inventory.push(id); recalculateHeldEffects(); emit('itemAdded', id); scheduleRender(); } }
+function addItem(id) { if (!hasItem(id)) { G.inventory.push(id); recalculateHeldEffects(); const it=_registries.items?_registries.items[id]:null; showToast('Carried: '+(it&&it.name?it.name:id)+'.', 'note'); emit('itemAdded', id); scheduleRender(); } }
 function removeItem(id) { G.inventory = G.inventory.filter(i => i !== id); recalculateHeldEffects(); emit('itemRemoved', id); scheduleRender(); }
 
 function _ensureStance(npcId) { if (!G.npcStance[npcId]) G.npcStance[npcId] = { trust: 0, suspicion: 0, solidarity: 0, memories: [] }; }
@@ -296,7 +304,7 @@ function setStance(npcId, key, value) {
 }
 function modStance(npcId, key, delta) {
   const cur = getStance(npcId, key); setStance(npcId, key, cur + delta);
-  if (delta !== 0) showToast(`${npcId}: ${key} ${delta > 0 ? '+' + delta : delta}`, 'note');
+  // Reputation changes are silent — tracked in observations panel
 }
 function recordNpcMemory(npcId, memory) {
   _ensureStance(npcId);
@@ -471,7 +479,8 @@ function offerSounding(id) {
   if (!id || !_registries.soundings[id]) return;
   if (G.soundings.available.includes(id) || G.soundings.taken.some(t => t.id === id) || G.soundings.settled.includes(id)) return;
   G.soundings.available.push(id);
-  showToast('Sounding: ' + _registries.soundings[id].name, 'sounding');
+  const _snd = _registries.soundings[id];
+  showToast('Sounding available: ' + (_snd ? _snd.name : id) + '.', 'sounding');
   emit('soundingOffered', id);
 }
 
@@ -483,7 +492,7 @@ function settleSounding(soundingId) {
       G.soundings.settled.push(soundingId);
       const snd = _registries.soundings[soundingId];
       if (snd && snd.effect) applyEffect(snd.effect);
-      showToast(`${snd.name} has settled.`, 'sounding');
+      showToast(`${snd.name} — settled.`, 'theosis');
       refreshAtmosMods(); emit('soundingSettled', soundingId);
     }
   }
@@ -494,7 +503,16 @@ function applySoundingProgress(soundingId, delta) {
   const old = entry.progress;
   entry.progress = Math.min(Math.max(entry.progress + delta, 0), SOUNDING_THRESHOLD);
   if (entry.progress >= SOUNDING_THRESHOLD && old < SOUNDING_THRESHOLD) settleSounding(soundingId);
-  if (delta !== 0) { showToast(`${_registries.soundings[soundingId].name}: ${delta > 0 ? '+' + delta : delta}`, 'sounding'); emit('soundingProgress', { soundingId, progress: entry.progress, delta }); }
+  if (delta !== 0) {
+    // Only toast at halfway and near-complete thresholds, not every increment
+    const half = Math.floor(SOUNDING_THRESHOLD / 2);
+    if ((old < half && entry.progress >= half) || (old < SOUNDING_THRESHOLD - 1 && entry.progress >= SOUNDING_THRESHOLD - 1)) {
+      const snd = _registries.soundings[soundingId];
+      const pct = entry.progress >= SOUNDING_THRESHOLD - 1 ? 'almost settled' : 'halfway';
+      showToast((snd ? snd.name : soundingId) + ': ' + pct + '.', 'sounding');
+    }
+    emit('soundingProgress', { soundingId, progress: entry.progress, delta });
+  }
 }
 
 function applyAutoAlignment(tags) {
@@ -510,7 +528,8 @@ function takeSounding(id) {
   if (soundingSlotsFull()) { G.soundingPending = id; G.panelOpen = 'breviary'; scheduleRender(); return; }
   G.soundings.available = G.soundings.available.filter(x => x !== id);
   G.soundings.taken.push({ id, progress: 0 }); G.soundingPending = null;
-  showToast(_registries.soundings[id].name + ': taking the sounding.', 'sounding');
+  const _takenSnd = _registries.soundings[id];
+  showToast((_takenSnd ? _takenSnd.name : id) + ' — sounding begun.', 'sounding');
   emit('soundingTaken', id); scheduleRender();
 }
 
@@ -540,7 +559,7 @@ function tickSoundings() {
     G.soundings.settled.push(id);
     const s = _registries.soundings[id];
     if (s && s.effect) applyEffect(s.effect);
-    showToast(s.name + ': settled.', 'sounding');
+    showToast(s.name + ' — settled.', 'theosis');
     refreshAtmosMods(); emit('soundingSettled', id);
   });
 }
@@ -592,7 +611,13 @@ function getTheosisTagValues() { return _theosisTagValues; }
 function incrementTheosis(amount) {
   if (amount === 0) return;
   const oldValue = G.theosis;
+  const oldTier = oldValue <= 32 ? 0 : oldValue <= 65 ? 1 : 2;
   G.theosis = Math.min(Math.max(G.theosis + amount, 0), 100);
+  const newTier = G.theosis <= 32 ? 0 : G.theosis <= 65 ? 1 : 2;
+  if (newTier > oldTier) {
+    const tierMsg = ['Asleep', 'Waking', 'Illumined'];
+    setTimeout(() => showToast(tierMsg[newTier] + '.', 'theosis'), 500);
+  }
   refreshAtmosMods();
   checkJournalThresholds(G.theosis, oldValue);
   emit('theosisChanged', G.theosis);
@@ -603,6 +628,18 @@ function incrementTheosis(amount) {
 function setMagneticDeviation(val) {
   G.magneticDeviation = Math.max(0, Math.min(1, val));
   emit('magneticDeviationChanged', G.magneticDeviation);
+  // Apply diegetic CSS filter to game body
+  const dev = G.magneticDeviation;
+  const body = document.getElementById('root');
+  if (body) {
+    if (dev > 0.7) {
+      body.dataset.deviation = 'high';
+    } else if (dev > 0.4) {
+      body.dataset.deviation = 'mid';
+    } else {
+      body.dataset.deviation = 'low';
+    }
+  }
   scheduleRender();
 }
 function getMagneticDeviation() { return G.magneticDeviation || 0; }
@@ -655,7 +692,7 @@ function _initFog() {
   for (let i = 0; i < 22; i++) fogParts.push({ x: Math.random()*canvas.width, y: Math.random()*canvas.height, r: 80+Math.random()*140, vx: (Math.random()-.5)*.25, vy: (Math.random()-.5)*.08, ph: Math.random()*Math.PI*2, base: .025+Math.random()*.05 });
 }
 _initFog();
-function _porthole() { const r = Math.min(canvas.width,canvas.height)*.085; return { x: canvas.width-r-28, y: r+28, r }; }
+function _porthole() { const r = Math.min(canvas.width,canvas.height)*.14; return { x: canvas.width-r-36, y: r+36, r }; }
 function _initRain() {
   const p = _porthole(); rainDrops = [];
   for (let i = 0; i < 24; i++) rainDrops.push({ x: p.x+(Math.random()-.5)*p.r*2, y: p.y+(Math.random()-.5)*p.r*2, len: 5+Math.random()*9, spd: 1.2+Math.random()*2 });
@@ -717,19 +754,81 @@ function drawAtmos() {
 
 function _drawPorthole() {
   const {x,y,r}=_porthole();
-  ctx.strokeStyle='#1c2830'; ctx.lineWidth=r*.18; ctx.beginPath(); ctx.arc(x,y,r,0,Math.PI*2); ctx.stroke();
-  ctx.fillStyle='#243038';
-  for (let i=0;i<8;i++) { const a=(i/8)*Math.PI*2; ctx.beginPath(); ctx.arc(x+Math.cos(a)*(r+r*.1),y+Math.sin(a)*(r+r*.1),r*.045,0,Math.PI*2); ctx.fill(); }
-  ctx.save(); ctx.beginPath(); ctx.arc(x,y,r*.87,0,Math.PI*2); ctx.clip();
-  const sc=mood==='uncanny'?'#060e18':mood==='revelation'?'#202810':'#0e1820';
-  const sg=ctx.createLinearGradient(x,y-r,x,y+r); sg.addColorStop(0,sc); sg.addColorStop(1,'#182430');
+  const gi=atmosMods.goldIntensity;
+  // Outer brass ring — thick and visible
+  const brassR = gi>0 ? `rgba(${Math.round(lerpN(100,180,gi))},${Math.round(lerpN(80,140,gi))},${Math.round(lerpN(40,60,gi))},0.9)` : 'rgba(95,78,42,0.88)';
+  ctx.strokeStyle=brassR; ctx.lineWidth=r*.22;
+  ctx.beginPath(); ctx.arc(x,y,r,0,Math.PI*2); ctx.stroke();
+  // Bolts around ring
+  ctx.fillStyle=gi>0?`rgba(160,130,60,0.95)`:'rgba(80,65,35,0.9)';
+  for (let i=0;i<8;i++) { const a=(i/8)*Math.PI*2; ctx.beginPath(); ctx.arc(x+Math.cos(a)*(r+r*.06),y+Math.sin(a)*(r+r*.06),r*.052,0,Math.PI*2); ctx.fill(); }
+  // Glass interior
+  ctx.save(); ctx.beginPath(); ctx.arc(x,y,r*.86,0,Math.PI*2); ctx.clip();
+  // Sky gradient — changes with mood and theosis
+  let skyTop, skyBot, horizY;
+  if (mood==='revelation'||gi>0.5) {
+    skyTop=`rgba(${Math.round(lerpN(8,40,gi))},${Math.round(lerpN(20,55,gi))},${Math.round(lerpN(35,25,gi))},1)`;
+    skyBot=`rgba(${Math.round(lerpN(10,60,gi))},${Math.round(lerpN(25,45,gi))},${Math.round(lerpN(40,20,gi))},1)`;
+  } else if (mood==='uncanny') {
+    skyTop='rgba(4,8,20,1)'; skyBot='rgba(6,14,28,1)';
+  } else if (mood==='tense') {
+    skyTop='rgba(14,16,22,1)'; skyBot='rgba(18,22,28,1)';
+  } else {
+    skyTop='rgba(8,18,32,1)'; skyBot='rgba(12,26,40,1)';
+  }
+  horizY = y + r*0.08 + Math.sin(T*0.15)*r*0.06;
+  const sg=ctx.createLinearGradient(x,y-r,x,y+r);
+  sg.addColorStop(0,skyTop); sg.addColorStop(0.5,skyBot);
+  // Water
+  let waterDeep, waterSurf;
+  if (gi>0.4) { waterDeep=`rgba(${Math.round(20+gi*30)},${Math.round(30+gi*20)},${Math.round(15+gi*10)},1)`; waterSurf=`rgba(${Math.round(30+gi*40)},${Math.round(50+gi*30)},${Math.round(30+gi*15)},1)`; }
+  else if (mood==='uncanny') { waterDeep='rgba(2,6,18,1)'; waterSurf='rgba(4,12,24,1)'; }
+  else { waterDeep='rgba(4,14,28,1)'; waterSurf='rgba(8,22,40,1)'; }
+  sg.addColorStop(0.52,waterSurf); sg.addColorStop(1,waterDeep);
   ctx.fillStyle=sg; ctx.fillRect(x-r,y-r,r*2,r*2);
-  const sw=atmosMods.soboWarm;
-  ctx.strokeStyle=`rgba(${sw?80:60},${sw?110:100},${sw?120:130},${mood==='uncanny'?0.5:0.25})`; ctx.lineWidth=.8;
-  for (let i=0;i<6;i++) { const wy=y+r*.2+i*r*.12+Math.sin(T*.6+i*1.2)*2; ctx.beginPath(); ctx.moveTo(x-r,wy); ctx.quadraticCurveTo(x,wy+Math.sin(T+i)*3,x+r,wy); ctx.stroke(); }
-  ctx.strokeStyle=`rgba(100,150,180,${mood==='tense'?0.35:0.18})`; ctx.lineWidth=.6;
-  for (const d of rainDrops) { d.y+=d.spd; if (d.y>y+r) { d.y=y-r; d.x=x+(Math.random()-.5)*r*2; } ctx.beginPath(); ctx.moveTo(d.x,d.y); ctx.lineTo(d.x-1,d.y+d.len); ctx.stroke(); }
-  ctx.restore(); ctx.strokeStyle='#2a3c48'; ctx.lineWidth=1.5; ctx.beginPath(); ctx.arc(x,y,r*.87,0,Math.PI*2); ctx.stroke();
+  // Horizon glow
+  const hg=ctx.createLinearGradient(x-r,horizY-r*.08,x+r,horizY+r*.08);
+  let hAlpha = mood==='revelation'?0.18:mood==='uncanny'?0.04:0.08;
+  if(gi>0) hAlpha=lerpN(hAlpha,0.25,gi);
+  const hR=gi>0?Math.round(lerpN(120,200,gi)):100, hG=gi>0?Math.round(lerpN(140,170,gi)):140, hB=gi>0?Math.round(lerpN(160,80,gi)):160;
+  hg.addColorStop(0,`rgba(${hR},${hG},${hB},0)`);
+  hg.addColorStop(0.5,`rgba(${hR},${hG},${hB},${hAlpha.toFixed(3)})`);
+  hg.addColorStop(1,`rgba(${hR},${hG},${hB},0)`);
+  ctx.fillStyle=hg; ctx.fillRect(x-r,horizY-r*.08,r*2,r*.16);
+  // Wave lines
+  const wAlpha = mood==='uncanny'?0.55:mood==='tense'?0.45:0.35;
+  const wR=gi>0?Math.round(lerpN(60,120,gi)):50;
+  const wG=gi>0?Math.round(lerpN(100,140,gi)):100;
+  const wB=gi>0?Math.round(lerpN(130,90,gi)):140;
+  ctx.strokeStyle=`rgba(${wR},${wG},${wB},${wAlpha})`; ctx.lineWidth=0.9;
+  for (let i=0;i<7;i++) {
+    const wy=horizY+r*.14+i*r*.1+Math.sin(T*.5+i*.9)*r*.025;
+    const amp=r*.03*(1-i/10);
+    ctx.beginPath(); ctx.moveTo(x-r*.9,wy);
+    for(let xi=-r*.9;xi<=r*.9;xi+=4) ctx.lineTo(x+xi,wy+Math.sin(T*0.7+xi*.04+i*.5)*amp);
+    ctx.stroke();
+  }
+  // Rain when tense
+  if(mood==='tense') {
+    ctx.strokeStyle='rgba(120,160,200,0.3)'; ctx.lineWidth=0.5;
+    for (const d of rainDrops) { d.y+=d.spd; if (d.y>y+r) { d.y=y-r; d.x=x+(Math.random()-.5)*r*2; } ctx.beginPath(); ctx.moveTo(d.x,d.y); ctx.lineTo(d.x-1,d.y+d.len); ctx.stroke(); }
+  }
+  // Gold shimmer for high theosis
+  if(gi>0.3) {
+    const shimmer=ctx.createRadialGradient(x,horizY,0,x,horizY,r*.6);
+    shimmer.addColorStop(0,`rgba(212,175,55,${(gi*0.12).toFixed(3)})`);
+    shimmer.addColorStop(1,'rgba(212,175,55,0)');
+    ctx.fillStyle=shimmer; ctx.fillRect(x-r,y-r,r*2,r*2);
+  }
+  ctx.restore();
+  // Inner ring shadow
+  ctx.strokeStyle='rgba(0,0,0,0.6)'; ctx.lineWidth=2; ctx.beginPath(); ctx.arc(x,y,r*.86,0,Math.PI*2); ctx.stroke();
+  // Gleam highlight
+  ctx.save(); ctx.beginPath(); ctx.arc(x,y,r*.86,0,Math.PI*2); ctx.clip();
+  const gleam=ctx.createLinearGradient(x-r*.4,y-r*.7,x+r*.1,y-r*.2);
+  gleam.addColorStop(0,'rgba(255,255,255,0.06)'); gleam.addColorStop(1,'rgba(255,255,255,0)');
+  ctx.fillStyle=gleam; ctx.fillRect(x-r,y-r,r*2,r*2);
+  ctx.restore();
 }
 drawAtmos();
 
@@ -755,23 +854,43 @@ function _initAudio() {
     _actx=new(window.AudioContext||window.webkitAudioContext)();
     const master=_actx.createGain(); master.gain.value=0; master.connect(_actx.destination); _gainNode=master;
     const rev=_makeReverb(_actx); _reverbGain=_actx.createGain(); _reverbGain.gain.value=0.18; rev.connect(_reverbGain); _reverbGain.connect(master);
-    _oscNodes=[50,101,149].map((freq,i)=>{const o=_actx.createOscillator(),g=_actx.createGain();o.frequency.value=freq;o.type='sawtooth';g.gain.value=[0.5,0.25,0.15][i];o.connect(g);g.connect(master);o.connect(rev);o.start();return o;});
-    const buf=_actx.createBuffer(1,_actx.sampleRate,_actx.sampleRate);const d=buf.getChannelData(0);for(let i=0;i<d.length;i++)d[i]=Math.random()*2-1;
-    const ns=_actx.createBufferSource();ns.buffer=buf;ns.loop=true;
-    _filterNode=_actx.createBiquadFilter();_filterNode.type='lowpass';_filterNode.frequency.value=90;
-    const ng=_actx.createGain();ng.gain.value=0.03;ns.connect(_filterNode);_filterNode.connect(ng);ng.connect(master);ns.start();
+    // Sea sounds: layered filtered noise (deep swell + surface chop)
+    const sr=_actx.sampleRate;
+    // Deep swell noise buffer (4 seconds, looped)
+    const swellBuf=_actx.createBuffer(2,sr*4,sr);
+    for(let c=0;c<2;c++){const d=swellBuf.getChannelData(c);for(let i=0;i<d.length;i++)d[i]=(Math.random()*2-1)*0.5;}
+    const swell=_actx.createBufferSource();swell.buffer=swellBuf;swell.loop=true;
+    _filterNode=_actx.createBiquadFilter();_filterNode.type='lowpass';_filterNode.frequency.value=120;
+    const swellHigh=_actx.createBiquadFilter();swellHigh.type='highpass';swellHigh.frequency.value=20;
+    const swellGain=_actx.createGain();swellGain.gain.value=0.06;
+    swell.connect(_filterNode);_filterNode.connect(swellHigh);swellHigh.connect(swellGain);swellGain.connect(master);swell.start();
+    // Surface chop noise (higher frequency, quieter)
+    const chopBuf=_actx.createBuffer(1,sr*2,sr);
+    const cd2=chopBuf.getChannelData(0);for(let i=0;i<cd2.length;i++)cd2[i]=(Math.random()*2-1);
+    const chop=_actx.createBufferSource();chop.buffer=chopBuf;chop.loop=true;
+    const chopF=_actx.createBiquadFilter();chopF.type='bandpass';chopF.frequency.value=600;chopF.Q.value=0.4;
+    const chopGain=_actx.createGain();chopGain.gain.value=0.012;
+    chop.connect(chopF);chopF.connect(chopGain);chopGain.connect(master);chop.start();
+    // LFO for swell modulation (slow wave rhythm ~0.08Hz)
+    _oscNodes=[_actx.createOscillator(),_actx.createOscillator()];
+    _oscNodes[0].type='sine';_oscNodes[0].frequency.value=0.08;
+    _oscNodes[1].type='sine';_oscNodes[1].frequency.value=0.13;
+    const lfoGain0=_actx.createGain();lfoGain0.gain.value=0.025;
+    const lfoGain1=_actx.createGain();lfoGain1.gain.value=0.015;
+    _oscNodes[0].connect(lfoGain0);lfoGain0.connect(swellGain.gain);_oscNodes[0].start();
+    _oscNodes[1].connect(lfoGain1);lfoGain1.connect(chopGain.gain);_oscNodes[1].start();
   } catch(e) { console.warn('Audio:',e); }
 }
 function _gain() { return _currentMoodRef==='tense'?0.055:_currentMoodRef==='revelation'?0.015:_currentMoodRef==='uncanny'?0.008:0.035; }
 function _applyMood(m) {
   if (!_actx||!_audioOn) return;
   const t=_actx.currentTime;
-  const cfg={neutral:{freqs:[50,101,149],filter:90,rv:0.18},tense:{freqs:[48,98,146],filter:60,rv:0.08},uncanny:{freqs:[44,88,132],filter:200,rv:0.35},revelation:{freqs:[55,110,165],filter:420,rv:0.45}}[m]||{freqs:[50,101,149],filter:90,rv:0.18};
-  _oscNodes.forEach((o,i)=>{if(o)o.frequency.setTargetAtTime(cfg.freqs[i],t,2.5);});
-  if(_filterNode)_filterNode.frequency.setTargetAtTime(cfg.filter,t,2.5);
-  if(_reverbGain)_reverbGain.gain.setTargetAtTime(cfg.rv,t,2.5);
-  if(m==='revelation'){try{const b=_actx.createOscillator(),bg=_actx.createGain();b.type='sine';b.frequency.value=880;bg.gain.setValueAtTime(0.07,t);bg.gain.exponentialRampToValueAtTime(0.0001,t+4);b.connect(bg);bg.connect(_gainNode);b.start(t);b.stop(t+4);}catch(e){}}
-  if(m==='uncanny'){try{const w=_actx.createOscillator(),wg=_actx.createGain();w.type='sine';w.frequency.value=333;wg.gain.setValueAtTime(0.012,t);wg.gain.exponentialRampToValueAtTime(0.0001,t+5);w.connect(wg);wg.connect(_gainNode);w.start(t);w.stop(t+5);}catch(e){}}
+  // Sea mood: modulate filter cutoff and reverb to change wave character
+  // neutral: deep ocean swell; tense: choppier higher freqs; uncanny: muffled below surface; revelation: bright open water
+  const cfg={neutral:{filter:120,rv:0.18,lfo:0.08},tense:{filter:800,rv:0.06,lfo:0.22},uncanny:{filter:55,rv:0.45,lfo:0.04},revelation:{filter:2200,rv:0.55,lfo:0.11}}[m]||{filter:120,rv:0.18,lfo:0.08};
+  if(_filterNode)_filterNode.frequency.setTargetAtTime(cfg.filter,t,3.0);
+  if(_reverbGain)_reverbGain.gain.setTargetAtTime(cfg.rv,t,3.0);
+  if(_oscNodes&&_oscNodes[0])_oscNodes[0].frequency.setTargetAtTime(cfg.lfo,t,4.0);
 }
 function _updateAudioMood(newMood) {
   _currentMoodRef=newMood;
@@ -887,8 +1006,9 @@ function saveGameSlot(slotId) {
       codexUnlocked: [...G.codexUnlocked],
       ambientTriggered: [...G.ambientTriggered],
       magneticDeviation: G.magneticDeviation || 0,
+      worldState: G.worldState || { shipStability: 5, sanctity: 0, socialTrust: 5 },
     };
-    localStorage.setItem(SAVE_KEY_PREFIX + slotId, JSON.stringify(state));
+    try { localStorage.setItem(SAVE_KEY_PREFIX + slotId, JSON.stringify(state)); } catch(e) { console.warn('Save write failed:', e); showToast('Save failed — storage full?', 'warning'); return; }
     saveJournal(slotId);
     showToast(`Saved to slot ${slotId}`, 'note');
     emit('saveSlot', slotId);
@@ -937,6 +1057,7 @@ function loadGameSlot(slotId) {
     G.codexUnlocked    = new Set(s.codexUnlocked   || []);
     G.ambientTriggered = new Set(s.ambientTriggered || []);
     G.magneticDeviation = s.magneticDeviation !== undefined ? s.magneticDeviation : 0;
+    G.worldState = s.worldState || { shipStability: 5, sanctity: 0, socialTrust: 5 };
     loadJournal(slotId);
     refreshAtmosMods();
     scheduleRender();
@@ -1280,6 +1401,7 @@ function applyChoice(ch) {
     if (G.scene && ch.text) G.choiceHistory[G.scene] = { text: ch.text, timestamp: Date.now(), crossing: G.playCount };
     if (consequenceRedirected || deadlineRedirect) { emit('choiceApplied', ch); return; }
     if (ch.next === '__new_play__') { newPlay(); return; }
+    if (ch.start_ritual) { const [rid,sscene,nscene] = ch.start_ritual; startRitual(rid, sscene, nscene); return; }
     if (ch.next) navigate(ch.next);
     emit('choiceApplied', ch);
   } finally { _processingChoice = false; }
@@ -1762,7 +1884,27 @@ function resolveTextBlock(textBlock){
 function getSceneText(scene){return resolveTextBlock(scene.text);}
 function resolveLayeredText(scene){return getSceneText(scene);}
 function injectMicroLines(a,_s){return a;}
-function applyLinguisticToggle(t){return t;}
+const _toggleMemo = new Map();
+function applyLinguisticToggle(t){
+  const doubt = G.stats.doubt || 0;
+  if (doubt < 4 || !_registries.translations || !Object.keys(_registries.translations).length) return t;
+  // Memoize per scene+doubt-tier to prevent per-render flickering
+  const tier = doubt >= 7 ? 'H' : doubt >= 5 ? 'M' : 'L';
+  const key = G.scene + '|' + tier + '|' + t.slice(0, 32);
+  if (_toggleMemo.has(key)) return _toggleMemo.get(key);
+  const flicker = tier === 'H' ? 0.35 : tier === 'M' ? 0.18 : 0.08;
+  let result = t;
+  for (const [orig, trans] of Object.entries(_registries.translations)) {
+    if (Math.random() < flicker) {
+      result = result.replaceAll(orig, `<span class="cyrillic-flicker" title="${orig}">${trans}</span>`);
+    }
+  }
+  _toggleMemo.set(key, result);
+  // Expire memo on scene change
+  return result;
+}
+// Clear memo on navigation
+function _clearToggleMemo() { _toggleMemo.clear(); }
 function applyPostEventShifts(t){return t;}
 function applyPastLifeLines(a,_id){return a;}
 function injectGhostText(t,_id){return t;}
@@ -1856,14 +1998,17 @@ function renderTitle(root){
   const d=document.createElement('div');d.className='title-screen';
   d.innerHTML=`
     <div class="title-cyrillic">${window.GAME_TITLE||'GAME'}</div>
-    <div style="font-size:.72rem;color:var(--dim);letter-spacing:.3em;text-transform:uppercase;margin-bottom:.2rem">${window.GAME_SUBTITLE||''}</div>
-    <div style="font-size:.68rem;color:var(--amber-dim);letter-spacing:.18em;font-style:italic;margin-bottom:${isDemo?'1.2':'3.5'}rem">${window.GAME_MOTTO||'Thank You'}</div>
+    <div style="font-family:'GOST type B','Share Tech Mono',monospace;font-size:.7rem;color:var(--dim);letter-spacing:.3em;text-transform:uppercase;margin-bottom:.2rem">${window.GAME_SUBTITLE||''}</div>
+    <div style="font-family:'GOST type B','Share Tech Mono',monospace;font-size:.66rem;color:var(--amber-dim);letter-spacing:.22em;margin-bottom:${isDemo?'1.2':'2'}rem">${window.GAME_MOTTO||'Thank You'}</div>
     ${isDemo?'<div style="font-size:.8rem;color:var(--amber);border:1px solid var(--amber-dim);padding:.5rem 1.2rem;margin-bottom:2.5rem">DEMO VERSION \u2014 Act One Only</div>':''}
-    <pre style="font-size:.62rem;color:var(--border-mid);white-space:pre;line-height:1.3;margin-bottom:3rem">
-            ___
-       ____/ | \\____
-  ~~~~|______________|~~~~
-    ~~~~~~~~~~~~~~~~~~~~~~~~~~</pre>
+    <pre class="title-ship-art" style="font-family:'GOST type B','Share Tech Mono',monospace;font-size:.62rem;color:var(--cold-dim);white-space:pre;line-height:1.25;margin-bottom:2.5rem;text-align:center;opacity:0.7">
+      |    |    |
+     )_)  )_)  )_)
+    )___))___))___)\\
+   )____)____)_____)\\\\
+___|____|____|____\\\\\\__
+--\\                    /--
+~~~  ~~~~  ~~~  ~~~  ~~~</pre>
     <div style="font-size:.78rem;color:${replay?'var(--cold-dim)':'var(--dim)'};letter-spacing:.12em;font-style:italic;margin-bottom:2rem">${replay?'another crossing.':'a crossing.'}</div>
     <div style="display:flex;flex-direction:column;gap:.6rem;align-items:center">
       ${hasSave?`<button class="btn" id="tc">Continue crossing</button><button class="btn btn-sm" id="tn">New crossing</button>`:`<button class="btn" id="tb">Begin the crossing</button>`}
@@ -1882,7 +2027,7 @@ function renderTitle(root){
 }
 function _continueGame(){
   if(loadGameLegacy()){
-    // Validate the saved scene still exists; if not, restart from initial scene
+    G.phase = 'game';
     if(G.scene && !getScene(G.scene)){
       console.warn('[SOBORNOST] Saved scene "'+G.scene+'" not found — resetting to initial scene');
       G.scene = getInitialScene();
@@ -2025,19 +2170,20 @@ function beginGame(){
 
 function _renderTutorial(root){
   const div=document.createElement('div');div.className='tutorial-overlay';
-  if(_registries.tutorialContent)
-    div.innerHTML=`<div class="tutorial-box">${_registries.tutorialContent}<button class="btn" style="margin-top:1.5rem;width:100%" id="dt">Board the ship</button></div>`;
-  else
-    div.innerHTML=`<div class="tutorial-box">
-      <div class="tutorial-h">Before you board</div>
-      <div class="tutorial-item"><strong>Status bar</strong> \u2014 top of screen. Vigilance, Composure, Communion, Doubt.</div>
-      <div class="tutorial-item"><strong>The Breviary</strong> <span class="key">breviary</span> \u2014 centre bottom. Soundings settle through choices.</div>
-      <div class="tutorial-item"><strong>Observations</strong> <span class="key">observations</span> \u2014 right bottom.</div>
-      <div class="tutorial-item"><strong>Status</strong> <span class="key">status</span> \u2014 left bottom.</div>
-      <div class="tutorial-item"><strong>Abandon crossing</strong> \u2014 bottom of each scene.</div>
-      <button class="btn" style="margin-top:1.5rem;width:100%" id="dt">Board the ship</button>
-    </div>`;
-  div.querySelector('#dt').addEventListener('click',dismissTutorial);root.appendChild(div);
+  div.setAttribute('role','dialog');
+  div.setAttribute('aria-label','Before you board');
+  // Tap backdrop to dismiss on mobile
+  div.addEventListener('click',(e)=>{if(e.target===div)dismissTutorial();});
+  const boxHtml = _registries.tutorialContent || `
+    <div class="tutorial-h">Before you board</div>
+    <div class="tutorial-item"><strong>Stats</strong> \u2014 top of screen. Bearing, Stillness, Solidarity, Static.</div>
+    <div class="tutorial-item"><strong>Cover</strong> \u2014 build it through conversation. Be consistent.</div>
+    <div class="tutorial-item"><strong>Breviary</strong> \u2014 bottom centre. Soundings settle through choices.</div>
+    <div class="tutorial-item"><strong>Observations / Status / Codex / Map</strong> \u2014 bottom row.</div>
+    <div class="tutorial-item" style="color:var(--dim);font-size:.78rem;margin-top:.6rem">Multiple crossings. What carries forward depends on how far you have come.</div>`;
+  div.innerHTML=`<div class="tutorial-box">${boxHtml}<button class="btn" style="margin-top:1.5rem;width:100%;min-height:48px;font-size:1rem" id="dt">Board the ship</button></div>`;
+  div.querySelector('#dt').addEventListener('click',dismissTutorial);
+  root.appendChild(div);
 }
 
 function _renderRollBox(root){
@@ -2163,20 +2309,21 @@ function renderGame(root){
     });
   }
   body.appendChild(cd);
-  if(G.notes.length){
-    const od=document.createElement('div');od.className='obs-section';
-    const ot=document.createElement('div');ot.className='obs-title';ot.textContent='observations';od.appendChild(ot);
-    const cats=[{label:'People',test:k=>k.startsWith('met_')},{label:'Cover',test:k=>k.startsWith('cover_')},{label:'Events',test:k=>!k.startsWith('met_')&&!k.startsWith('cover_')&&!k.startsWith('charism_')}];
-    const shown=new Set();
-    cats.forEach(cat=>{
-      const items=[...G.notes].reverse().filter(k=>cat.test(k)&&!shown.has(k)).slice(0,3);if(!items.length)return;
-      const sec=document.createElement('div');sec.style.cssText='font-size:.6rem;color:var(--amber-dim);letter-spacing:.12em;text-transform:uppercase;margin:.4rem 0 .2rem';sec.textContent=cat.label;od.appendChild(sec);
-      items.forEach(k=>{shown.add(k);const d=document.createElement('div');d.className='obs-item';d.textContent='\u2022 '+noteLabel(k);od.appendChild(d);});
-    });
-    body.appendChild(od);
-  }
   body.appendChild(_buildRestartBar());wrap.appendChild(body);root.appendChild(wrap);
   _appendAudioBtn(root);_appendBottomNav(root);
+  // Mobile stat tip tap handler
+  if ('ontouchstart' in window) {
+    root.querySelectorAll('.stat').forEach(s => {
+      s.addEventListener('touchstart', (e) => {
+        e.preventDefault();
+        document.querySelectorAll('.stat.tip-open').forEach(o => { if (o !== s) o.classList.remove('tip-open'); });
+        s.classList.toggle('tip-open');
+        setTimeout(() => s.classList.remove('tip-open'), 2500);
+      }, { passive: false });
+    });
+  }
+  // Version watermark
+  { const vm=document.createElement('div');vm.className='version-mark';vm.textContent='SPASIBO v1.2 — Zarya';root.appendChild(vm); }
   if(G.panelOpen==='notes')    _renderNotesPanel(root);
   if(G.panelOpen==='status')   _renderStatusPanel(root);
   if(G.panelOpen==='breviary') _renderBreviaryPanel(root);
@@ -2191,10 +2338,24 @@ function _buildHeader(scene){
   const hdr=document.createElement('div');hdr.className='game-header';
   const si=document.createElement('div');si.className='save-indicator';si.textContent='\u25e6 autosaved';si.style.display='none';hdr.appendChild(si);
   const moodCls=scene.mood==='uncanny'?' uncanny':scene.mood==='revelation'?' revelation':'';
-  const lb=document.createElement('div');lb.className='location-bar'+moodCls;lb.textContent=scene.location;hdr.appendChild(lb);
-  const sb=document.createElement('div');sb.className='sbar';
+  const lb=document.createElement('div');lb.className='location-bar'+moodCls;
+  const hourName = LITURGICAL_HOURS[G.liturgicalHour]?.name;
+  lb.textContent = hourName ? `${scene.location}  ·  ${hourName}` : scene.location;
+  hdr.appendChild(lb);
+  const sbarDoubt = G.stats.doubt || 0;
+  const sb=document.createElement('div');sb.className='sbar'+(sbarDoubt>=7?' sbar-jitter':'');
   Object.entries(G.stats).forEach(([k,v])=>{const d=document.createElement('div');d.className='stat';d.innerHTML=k+' <span class="stat-val">'+v+'</span>'+(_registries.statTips[k]?'<span class="stat-tip">'+_registries.statTips[k]+'</span>':'');sb.appendChild(d);});
   if(G.theosis>32){const td=document.createElement('div');td.className='stat stat-theosis';const tier=G.theosis>65?'\u041a\u041a\u0410':String(G.theosis);td.innerHTML='<span class="stat-val" style="color:var(--gold)">'+tier+'</span><span class="stat-tip">theosis</span>';sb.appendChild(td);}
+  // Deviation compass — shown when magneticDeviation > 0.2
+  if(G.magneticDeviation>0.2){
+    const dev=G.magneticDeviation;
+    const needlePos=Math.round(dev*8)-4; // -4 to +4
+    const bar='─'.repeat(Math.max(0,4+needlePos))+'N'+'─'.repeat(Math.max(0,4-needlePos));
+    const cd2=document.createElement('div');cd2.className='stat stat-compass';
+    const cmpColor=dev>0.7?'var(--amber)':'var(--cold-dim)';
+    cd2.innerHTML='<span class="stat-val" style="color:'+cmpColor+';font-family:var(--font-display)">'+bar+'</span><span class="stat-tip">magnetic deviation '+Math.round(dev*100)+'%</span>';
+    sb.appendChild(cd2);
+  }
   hdr.appendChild(sb);
   const tags=[];
   G.charisms.forEach(id=>{const c=findCharism(id);if(c)tags.push(`<span class="ctag" title="${c.desc}">${c.name}</span>`);});
@@ -2204,6 +2365,16 @@ function _buildHeader(scene){
   const tc=G.soundings.taken.length+G.soundings.settled.length,ta=G.soundings.available.length;
   if(tc>0||ta>0)tags.push(`<span class="breviary-tag">\u2693 ${tc}/${MAX_SOUNDINGS}${ta?' +'+ta:''}</span>`);
   if(tags.length){const cb=document.createElement('div');cb.className='cbar';cb.innerHTML=tags.join('');hdr.appendChild(cb);}
+  // Cover integrity bar — only show when cover has been partially established
+  const coverFields = Object.values(G.cover).filter(Boolean).length;
+  if(coverFields > 0) {
+    const cib = document.createElement('div'); cib.className='cover-hud';
+    const pct = (G.coverIntegrity / 5) * 100;
+    const hue = G.coverIntegrity >= 4 ? 'var(--cold)' : G.coverIntegrity >= 3 ? 'var(--amber)' : 'var(--rust)';
+    const pulse = G.coverIntegrity <= 2 ? ' cover-hud-pulse' : '';
+    cib.innerHTML = `<div class="cover-hud-label">cover</div><div class="cover-hud-track${pulse}"><div class="cover-hud-fill" style="width:${pct}%;background:${hue}"></div></div>`;
+    hdr.appendChild(cib);
+  }
   return hdr;
 }
 
@@ -2225,17 +2396,20 @@ function _appendBottomNav(root){
   const bnav=document.createElement('div');bnav.id='bottom-nav';
   bnav.style.cssText='position:fixed;bottom:0;left:0;width:100%;z-index:100;display:flex;justify-content:center;background:rgba(6,8,12,0.96);border-top:1px solid var(--border)';
   const codexCount=getUnlockedCodex().length;
+  const doubt = G.stats.doubt || 0;
+  const flicker = doubt >= 7 ? 0.4 : doubt >= 5 ? 0.2 : 0;
+  const fl = (en, ru) => (flicker > 0 && Math.random() < flicker) ? ru : en;
   const navItems=[
-    {label:'observations',fn:()=>openPanel('notes')},
-    {label:'status',fn:()=>openPanel('status')},
-    {label:'breviary'+(G.soundings.available.length?' \u2691':''),fn:()=>openPanel('breviary'),cls:G.soundings.available.length?' has-available':''},
-    {label:'codex',fn:()=>openPanel('glossary')},
-    {label:'map',fn:()=>openPanel('map')},
+    {label:fl('observations','наблюдения'),fn:()=>openPanel('notes'),   title:'What has been noticed this crossing'},
+    {label:fl('status','статус'),          fn:()=>openPanel('status'),  title:'Stats, cover, charisms, inventory'},
+    {label:'breviary'+(G.soundings.available.length?' \u2691':''),fn:()=>openPanel('breviary'),cls:G.soundings.available.length?' has-available':'', title:'Soundings — moments of contemplation'},
+    {label:fl('codex','кодекс'),           fn:()=>openPanel('glossary'),title:'What has been learned about the ship'},
+    {label:fl('map','карта'),              fn:()=>openPanel('map'),     title:'Where things are'},
   ];
-  navItems.forEach(({label,fn,cls=''})=>{
+  navItems.forEach(({label,fn,cls='',title=''})=>{
     const b=document.createElement('button');
-    b.style.cssText="flex:1;background:none;border:none;border-right:1px solid var(--border);font-family:'Courier Prime',monospace;font-size:.66rem;letter-spacing:.07em;padding:.55rem .3rem;cursor:pointer;color:var(--dim)";
-    b.className=cls;b.textContent=label;b.onclick=fn;bnav.appendChild(b);
+    b.style.cssText="flex:1;background:none;border:none;border-right:1px solid var(--border);font-family:'GOST type B','Share Tech Mono','Courier Prime',monospace;font-size:.58rem;letter-spacing:.12em;text-transform:uppercase;padding:.65rem .2rem;cursor:pointer;color:var(--dim)";
+    b.className=cls;b.textContent=label;b.onclick=fn;if(title)b.title=title;bnav.appendChild(b);
   });
   root.appendChild(bnav);
 }
@@ -2280,7 +2454,7 @@ function _renderNotesPanel(root) {
         ['mission_reality_known',     'The sealed envelope is open. You know what the crossing is for.'],
         ['mission_fully_understood',  'The archive is to be destroyed. Evidence made inconvenient.'],
         ['miguel_knows',              'Miguel knows. He has always known.'],
-        ['pablo_knows',               'Pavel knows. He was not surprised.'],
+        ['pavel_knows',               'Pavel knows. He was not surprised.'],
         ['mission_refused',           'You have refused the mission.'],
         ['radio_existence_known',     'There is a radio in the instrument room Othis does not know about.'],
     ]},
