@@ -110,7 +110,7 @@ function resetG(preserve = {}) {
   G._sceneCount = 0; G._coverChallenge = null;
   G.deadlines = []; G.choiceHistory = {};
   G.codexUnlocked = new Set(); G.ambientTriggered = new Set();
-  G.magneticDeviation = 0.0;
+  G.magneticDeviation = 0.0; // will be adjusted post-reset by anomaly-grows system
   Object.assign(G, preserve);
 }
 
@@ -124,11 +124,67 @@ let _scheduled = false;
 
 function setRenderFn(fn) { _renderFn = fn; }
 
+
+// ─────────────────────────────────────────────────────────────────
+// KEYBOARD NAVIGATION
+// ─────────────────────────────────────────────────────────────────
+function _initKeyboard() {
+  document.addEventListener('keydown', (e) => {
+    // Escape: close open panel
+    if (e.key === 'Escape' && G.panelOpen) { openPanel(null); return; }
+    // Escape: dismiss cover challenge
+    if (e.key === 'Escape' && G._coverChallenge && !G._coverChallenge.resolved) return; // can't escape challenge
+    // Number keys 1-9: activate nth choice
+    if (e.key >= '1' && e.key <= '9' && !G.panelOpen && !G._coverChallenge) {
+      const n = parseInt(e.key) - 1;
+      const choices = document.querySelectorAll('.choices .choice:not([disabled])');
+      if (choices[n]) { choices[n].click(); e.preventDefault(); }
+      return;
+    }
+    // Enter/Space on focused choice: activate
+    if ((e.key === 'Enter' || e.key === ' ') && document.activeElement?.classList.contains('choice')) {
+      document.activeElement.click(); e.preventDefault();
+    }
+    // Arrow keys for panel navigation when panel open
+    if (G.panelOpen && (e.key === 'ArrowUp' || e.key === 'ArrowDown')) {
+      const items = document.querySelectorAll('.panel-body .obs-note, .panel-body .codex-entry, .panel-body .map-node');
+      if (!items.length) return;
+      const focused = Array.from(items).findIndex(el => el === document.activeElement);
+      const next = e.key === 'ArrowDown' ? Math.min(focused + 1, items.length - 1) : Math.max(focused - 1, 0);
+      items[next]?.focus();
+      e.preventDefault();
+    }
+  });
+}
+
+let _lastScrolledScene = null;
 function scheduleRender() {
   if (_scheduled) return;
   if (!_renderFn) { console.warn('[SOBORNOST] scheduleRender() called before renderer registered'); return; }
   _scheduled = true;
-  queueMicrotask(() => { _scheduled = false; _renderFn(); window.scrollTo({ top: 0, behavior: 'instant' }); });
+  const _sceneAtSchedule = G.scene;
+  queueMicrotask(() => {
+    _scheduled = false; _renderFn();
+    // Only scroll when the scene actually changed — prevents disorienting
+    // scroll-snapping during panel opens, stat updates, dialogue advances
+    if (_sceneAtSchedule !== _lastScrolledScene) {
+      _lastScrolledScene = _sceneAtSchedule;
+      // Scroll every possible container — belt, suspenders, and a third belt
+      const _doScroll = () => {
+        try {
+          window.scrollTo({ top: 0, left: 0, behavior: 'instant' });
+          document.documentElement.scrollTop = 0;
+          document.body.scrollTop = 0;
+          const root = document.getElementById('root');
+          if (root) { root.scrollTop = 0; root.scrollLeft = 0; }
+          // If root is the scroll container (iOS common pattern), find first text element
+          const firstP = document.querySelector('.game-body .sp, .game-body p');
+          if (firstP) firstP.scrollIntoView({ block: 'start', behavior: 'instant' });
+        } catch(e) {}
+      };
+      requestAnimationFrame(() => { requestAnimationFrame(_doScroll); });
+    }
+  });
 }
 
 
@@ -185,6 +241,8 @@ function setObjectDescriptionFunction(fn) { _registries.objectDescriptionFn = fn
 
 function registerRollModifier(statKey, condition, bonusCallback) { _registries.rollModifiers.push({ statKey, condition, bonusCallback }); }
 function setAvailableModes(modeArray)       { _registries.availableModes = modeArray; }
+function setModeDescriptions(descs)          { _registries.modeDescriptions = descs || {}; }
+function getModeDescription(id)              { return (_registries.modeDescriptions||{})[id] || null; }
 function registerScenePool(poolId, entries) { _registries.scenePools[poolId] = entries; }
 function addToScenePool(poolId, entry) {
   if (!_registries.scenePools[poolId]) _registries.scenePools[poolId] = [];
@@ -220,7 +278,7 @@ function _flushToast() {
   const t = document.createElement('div');
   t.className = 'toast ' + (type || 'note');
   t.textContent = msg; document.body.appendChild(t);
-  setTimeout(() => { if (t.parentNode) t.remove(); _flushToast(); }, 2600);
+  setTimeout(() => { if (t.parentNode) t.remove(); _flushToast(); }, 3500);
 }
 
 function hasFlag(f) { return G.flags.has(f); }
@@ -428,8 +486,23 @@ function evaluateCondition(cond) {
   if (Array.isArray(cond)) return cond.every(c => evaluateCondition(c));
   switch (cond.type) {
     case 'flag':            return hasFlag(cond.id) === (cond.state !== false);
-    case 'stat':            return (G.stats[cond.name] || 0) >= (cond.min || 0);
+    case 'mode':          return G.mode === cond.mode;
+    case 'stat': {
+      // Support both G.stats and special values like coverIntegrity
+      let val = 0;
+      if (cond.stat === 'coverIntegrity' || cond.name === 'coverIntegrity') val = G.coverIntegrity !== undefined ? G.coverIntegrity : 5;
+      else val = G.stats[cond.stat||cond.name] || 0;
+      const minOk = cond.min === undefined || val >= cond.min;
+      const maxOk = cond.max === undefined || val <= cond.max;
+      return minOk && maxOk;
+    }
     case 'charism':         return G.charisms.includes(cond.id);
+    case 'hour':            return G.liturgicalHour !== undefined && G.liturgicalHour === cond.value;
+    case 'hour_gte':        return G.liturgicalHour !== undefined && G.liturgicalHour >= cond.value;
+    case 'hour_lte':        return G.liturgicalHour !== undefined && G.liturgicalHour <= cond.value;
+    case 'believes':        return G.beliefs && G.beliefs.has(cond.id);
+    case 'knows':           return G.knowledge && G.knowledge.has(cond.id);
+    case 'not_believes':    return !G.beliefs || !G.beliefs.has(cond.id);
     case 'item':            return hasItem(cond.id);
     case 'playcount':       return G.playCount >= (cond.min || 0);
     case 'awareness':       return (G.awareness || 0) >= (cond.min || 0);
@@ -471,7 +544,7 @@ function isChoiceLocked(ch) {
 // ============================================================
 
 const MAX_SOUNDINGS      = 4;
-const SOUNDING_THRESHOLD = 8;
+const SOUNDING_THRESHOLD = 6; // reachable naturally with tagged choices
 
 function soundingSlotsFull() { return G.soundings.taken.length + G.soundings.settled.length >= MAX_SOUNDINGS; }
 
@@ -491,11 +564,91 @@ function settleSounding(soundingId) {
     if (!G.soundings.settled.includes(soundingId)) {
       G.soundings.settled.push(soundingId);
       const snd = _registries.soundings[soundingId];
+      // Apply effects
+      if (snd && snd.theosis) incrementTheosis(snd.theosis);
+      if (snd && snd.stat && snd.statDelta) applyEffect({ [snd.stat]: snd.statDelta });
       if (snd && snd.effect) applyEffect(snd.effect);
-      showToast(`${snd.name} — settled.`, 'theosis');
+      if (snd && snd.onSettle) { try { snd.onSettle(); } catch(e) { console.error('onSettle error:', e); } }
+      playSfx('sounding_settle');
+      // Restore 1 cover integrity on settle (groundedness shores up the performance)
+      if (G.coverIntegrity !== undefined && G.coverIntegrity < 5) {
+        G.coverIntegrity = Math.min(5, G.coverIntegrity + 1);
+      }
       refreshAtmosMods(); emit('soundingSettled', soundingId);
+      // Show settle overlay — extended meditation on what was found
+      if (snd && (snd.settleText || snd.settleTitle)) {
+        _showSoundingSettleOverlay(snd);
+      } else {
+        showToast((snd ? snd.name : soundingId) + ' — settled.', 'theosis');
+      }
     }
   }
+}
+
+function _showSoundingSettleOverlay(snd) {
+  // Remove any existing overlay
+  document.querySelectorAll('.sounding-settle-overlay').forEach(el => el.remove());
+  const ov = document.createElement('div');
+  ov.className = 'sounding-settle-overlay';
+  ov.setAttribute('role', 'dialog');
+  ov.setAttribute('aria-label', 'Sounding settled');
+
+  const inner = document.createElement('div');
+  inner.className = 'sounding-settle-inner';
+
+  // Header label
+  const label = document.createElement('div');
+  label.className = 'sounding-settle-label';
+  label.textContent = 'settled';
+  inner.appendChild(label);
+
+  // Sounding name
+  const name = document.createElement('div');
+  name.className = 'sounding-settle-name';
+  name.textContent = snd.name || '';
+  inner.appendChild(name);
+
+  // Divider
+  const div1 = document.createElement('div');
+  div1.className = 'sounding-settle-divider';
+  inner.appendChild(div1);
+
+  // Extended settle text — the meditation
+  if (snd.settleText) {
+    const paras = Array.isArray(snd.settleText) ? snd.settleText : snd.settleText.split('\n\n');
+
+    paras.forEach(para => {
+      const p = document.createElement('p');
+      p.className = 'sounding-settle-para';
+      p.textContent = para.trim();
+      inner.appendChild(p);
+    });
+  }
+
+  // What has changed
+  if (snd.settleDesc) {
+    const div2 = document.createElement('div');
+    div2.className = 'sounding-settle-divider';
+    inner.appendChild(div2);
+    const desc = document.createElement('div');
+    desc.className = 'sounding-settle-desc';
+    desc.textContent = snd.settleDesc;
+    inner.appendChild(desc);
+  }
+
+  // Continue button
+  const btn = document.createElement('button');
+  btn.className = 'btn sounding-settle-btn';
+  btn.textContent = 'Continue.';
+  btn.onclick = () => { ov.remove(); scheduleRender(); };
+  inner.appendChild(btn);
+
+  ov.appendChild(inner);
+  ov.onclick = (e) => { if (e.target === ov) { ov.remove(); scheduleRender(); } };
+  document.body.appendChild(ov);
+
+  // Animate in
+  requestAnimationFrame(() => ov.classList.add('open'));
 }
 
 function applySoundingProgress(soundingId, delta) {
@@ -521,6 +674,35 @@ function applyAutoAlignment(tags) {
     const snd = _registries.soundings[entry.id];
     if (snd && snd.alignmentTags && snd.alignmentTags.some(tag => tags.includes(tag))) applySoundingProgress(entry.id, 1);
   }
+}
+
+// Ship state helpers
+function getShipState(key) { return (G.shipState||{})[key]||0; }
+function modShipState(key, delta) {
+  if (!G.shipState) G.shipState={morale:5,paranoia:0,exhaustion:0,saturation:0};
+  G.shipState[key] = Math.max(0, Math.min(10, (G.shipState[key]||0)+delta));
+  // Apply body classes for paranoia and exhaustion
+  document.body.classList.toggle('ship-paranoid',  G.shipState.paranoia >= 4);
+  document.body.classList.toggle('ship-exhausted', G.shipState.exhaustion >= 5);
+  document.body.classList.toggle('ship-low-morale',G.shipState.morale <= 3);
+  emit('shipStateChanged', { key, value: G.shipState[key] });
+}
+
+function progressSounding(soundingId, delta) {
+  // Advance a sounding by a specific amount — called when player acts in alignment
+  const entry = G.soundings.taken.find(s => s.id === soundingId);
+  if (!entry) return;
+  const old = entry.progress;
+  entry.progress = Math.min(Math.max(entry.progress + delta, 0), SOUNDING_THRESHOLD);
+  if (entry.progress >= SOUNDING_THRESHOLD && old < SOUNDING_THRESHOLD) settleSounding(soundingId);
+  else if (entry.progress !== old) {
+    // Toast only on meaningful milestones
+    const half = Math.floor(SOUNDING_THRESHOLD/2);
+    const snd = _registries.soundings[soundingId];
+    if (old < half && entry.progress >= half) showToast((snd?snd.name:soundingId)+' — deepening.','sounding');
+    emit('soundingProgress',{soundingId,progress:entry.progress,delta});
+  }
+  scheduleRender();
 }
 
 function takeSounding(id) {
@@ -559,7 +741,7 @@ function tickSoundings() {
     G.soundings.settled.push(id);
     const s = _registries.soundings[id];
     if (s && s.effect) applyEffect(s.effect);
-    showToast(s.name + ' — settled.', 'theosis');
+    showToast(s.name + ' — settled.', 'theosis'); playSfx('sounding_settle');
     refreshAtmosMods(); emit('soundingSettled', id);
   });
 }
@@ -616,7 +798,7 @@ function incrementTheosis(amount) {
   const newTier = G.theosis <= 32 ? 0 : G.theosis <= 65 ? 1 : 2;
   if (newTier > oldTier) {
     const tierMsg = ['Asleep', 'Waking', 'Illumined'];
-    setTimeout(() => showToast(tierMsg[newTier] + '.', 'theosis'), 500);
+    setTimeout(() => { showToast(tierMsg[newTier] + '.', 'theosis'); playSfx('theosis_moment'); }, 500);
   }
   refreshAtmosMods();
   checkJournalThresholds(G.theosis, oldValue);
@@ -627,6 +809,9 @@ function incrementTheosis(amount) {
 // Magnetic deviation: 0.0 = true north, 1.0 = maximum anomaly
 function setMagneticDeviation(val) {
   G.magneticDeviation = Math.max(0, Math.min(1, val));
+  // UI opacity fades slightly at high deviation (anomaly distortion)
+  const baseOpacity = 1 - (Math.max(0, val - 0.5) * 0.3);
+  setUiOpacity(Math.max(0.72, baseOpacity));
   emit('magneticDeviationChanged', G.magneticDeviation);
   // Apply diegetic CSS filter to game body
   const dev = G.magneticDeviation;
@@ -651,17 +836,21 @@ function flashTheosisLight(intensity = 1.0, duration = 2000) {
 }
 
 const _nameMappings = {};
-function registerNameMapping(original, tier1, tier2, cyrillic) { _nameMappings[original] = { tier1, tier2, cyrillic }; }
+function registerNameMapping(original, tier1, tier2, cyrillic, earlyCyrillic) { _nameMappings[original] = { tier1, tier2, cyrillic, earlyCyrillic: !!earlyCyrillic }; }
 function _escapeRe(s) { return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'); }
 function applyNameMapping(text) {
   if (!text) return text;
   const tier = getCurrentTier(); let result = text;
   for (const [original, mapping] of Object.entries(_nameMappings)) {
     let replacement = original;
-    if      (tier.max <= 32)  replacement = original;
-    else if (tier.max <= 65)  replacement = mapping.tier1  || original;
-    else if (tier.max <= 100) replacement = mapping.tier2  || mapping.tier1 || original;
-    if (mapping.cyrillic && tier.max >= 66) replacement = mapping.cyrillic;
+    const earlyC = mapping.earlyCyrillic; // flag for names that go Cyrillic at tier 2
+    if (tier.max <= 32) {
+      replacement = original;
+    } else if (tier.max <= 65) {
+      replacement = (earlyC && mapping.cyrillic) ? mapping.cyrillic : (mapping.tier1 || original);
+    } else {
+      replacement = mapping.cyrillic || mapping.tier2 || mapping.tier1 || original;
+    }
     if (replacement !== original) result = result.replace(new RegExp(_escapeRe(original), 'g'), replacement);
   }
   return result;
@@ -708,9 +897,10 @@ function refreshAtmosMods() {
   atmosMods.fogMult=1.0; atmosMods.lampWarm=0; atmosMods.lampFlicker=true; atmosMods.soboWarm=false;
   for (const mod of _atmosModifiers) if (s.includes(mod.soundingId)) mod.effectFn(atmosMods, _registries.soundings[mod.soundingId]);
   const t = G.theosis||0;
-  if (t>=71) atmosMods.goldIntensity=0.6;
-  else if (t>=33) atmosMods.goldIntensity=0.2+(t-33)/38*0.4;
-  else atmosMods.goldIntensity=0;
+  if (t>=85)      atmosMods.goldIntensity=0.92;
+  else if (t>=66) atmosMods.goldIntensity=0.60+(t-66)/19*0.30;
+  else if (t>=33) atmosMods.goldIntensity=0.10+(t-33)/33*0.30;
+  else            atmosMods.goldIntensity=0;
   atmosMods.goldGlow=atmosMods.goldIntensity>0;
 }
 
@@ -757,8 +947,18 @@ function _drawPorthole() {
   const gi=atmosMods.goldIntensity;
   // Outer brass ring — thick and visible
   const brassR = gi>0 ? `rgba(${Math.round(lerpN(100,180,gi))},${Math.round(lerpN(80,140,gi))},${Math.round(lerpN(40,60,gi))},0.9)` : 'rgba(95,78,42,0.88)';
-  ctx.strokeStyle=brassR; ctx.lineWidth=r*.22;
-  ctx.beginPath(); ctx.arc(x,y,r,0,Math.PI*2); ctx.stroke();
+  // Outer glow halo at high goldIntensity
+  if(gi>0.5){
+    ctx.save();
+    ctx.shadowColor=`rgba(212,175,55,${(gi-0.5)*0.9})`;
+    ctx.shadowBlur=r*(gi*0.4);
+    ctx.strokeStyle=brassR; ctx.lineWidth=r*.22;
+    ctx.beginPath(); ctx.arc(x,y,r,0,Math.PI*2); ctx.stroke();
+    ctx.restore();
+  } else {
+    ctx.strokeStyle=brassR; ctx.lineWidth=r*.22;
+    ctx.beginPath(); ctx.arc(x,y,r,0,Math.PI*2); ctx.stroke();
+  }
   // Bolts around ring
   ctx.fillStyle=gi>0?`rgba(160,130,60,0.95)`:'rgba(80,65,35,0.9)';
   for (let i=0;i<8;i++) { const a=(i/8)*Math.PI*2; ctx.beginPath(); ctx.arc(x+Math.cos(a)*(r+r*.06),y+Math.sin(a)*(r+r*.06),r*.052,0,Math.PI*2); ctx.fill(); }
@@ -795,18 +995,36 @@ function _drawPorthole() {
   hg.addColorStop(0.5,`rgba(${hR},${hG},${hB},${hAlpha.toFixed(3)})`);
   hg.addColorStop(1,`rgba(${hR},${hG},${hB},0)`);
   ctx.fillStyle=hg; ctx.fillRect(x-r,horizY-r*.08,r*2,r*.16);
-  // Wave lines
-  const wAlpha = mood==='uncanny'?0.55:mood==='tense'?0.45:0.35;
-  const wR=gi>0?Math.round(lerpN(60,120,gi)):50;
-  const wG=gi>0?Math.round(lerpN(100,140,gi)):100;
-  const wB=gi>0?Math.round(lerpN(130,90,gi)):140;
-  ctx.strokeStyle=`rgba(${wR},${wG},${wB},${wAlpha})`; ctx.lineWidth=0.9;
-  for (let i=0;i<7;i++) {
-    const wy=horizY+r*.14+i*r*.1+Math.sin(T*.5+i*.9)*r*.025;
-    const amp=r*.03*(1-i/10);
-    ctx.beginPath(); ctx.moveTo(x-r*.9,wy);
-    for(let xi=-r*.9;xi<=r*.9;xi+=4) ctx.lineTo(x+xi,wy+Math.sin(T*0.7+xi*.04+i*.5)*amp);
+  // Wave lines — slowly animated with phase offset per wave
+  const wAlpha = mood==='uncanny'?0.55:mood==='tense'?0.42:mood==='revelation'?0.28:0.35;
+  const wR=gi>0?Math.round(lerpN(50,100,gi)):45;
+  const wG=gi>0?Math.round(lerpN(100,140,gi)):90;
+  const wB=gi>0?Math.round(lerpN(130,80,gi)):130;
+  for (let i=0;i<8;i++) {
+    // Each wave has its own speed and phase
+    const speed = 0.18 + i * 0.06;
+    const phase = i * 1.1;
+    const wy = horizY + r*0.1 + i*r*0.09 + Math.sin(T*0.3 + phase)*r*0.018;
+    const amp = r * 0.028 * (1 - i*0.08);
+    // Wave opacity fades deeper
+    const wop = wAlpha * (1 - i*0.09);
+    ctx.strokeStyle=`rgba(${wR},${wG},${wB},${wop.toFixed(3)})`; 
+    ctx.lineWidth = i < 2 ? 1.2 : 0.8;
+    ctx.beginPath(); ctx.moveTo(x-r*.88, wy);
+    for(let xi=-r*.88; xi<=r*.88; xi+=3) {
+      const localAmp = amp * (1 - Math.abs(xi)/(r*.88)*0.3);
+      ctx.lineTo(x+xi, wy + Math.sin(T*speed + xi*0.038 + phase)*localAmp);
+    }
     ctx.stroke();
+  }
+  // Surface shimmer — tiny bright crests at high theosis
+  if(gi > 0.2) {
+    ctx.fillStyle=`rgba(${Math.round(lerpN(180,220,gi))},${Math.round(lerpN(200,220,gi))},${Math.round(lerpN(210,200,gi))},${(gi*0.06).toFixed(3)})`;
+    for(let i=0;i<6;i++) {
+      const cx2 = x + Math.sin(T*0.4+i*1.7)*r*0.35;
+      const cy2 = horizY + r*0.08 + i*r*0.06 + Math.sin(T*0.5+i)*r*0.02;
+      ctx.beginPath(); ctx.arc(cx2, cy2, 1.5+gi, 0, Math.PI*2); ctx.fill();
+    }
   }
   // Rain when tense
   if(mood==='tense') {
@@ -881,7 +1099,7 @@ function _initAudio() {
     _oscNodes[1].connect(lfoGain1);lfoGain1.connect(chopGain.gain);_oscNodes[1].start();
   } catch(e) { console.warn('Audio:',e); }
 }
-function _gain() { return _currentMoodRef==='tense'?0.055:_currentMoodRef==='revelation'?0.015:_currentMoodRef==='uncanny'?0.008:0.035; }
+function _gain() { return _currentMoodRef==='tense'?0.22:_currentMoodRef==='revelation'?0.18:_currentMoodRef==='uncanny'?0.14:0.18; }
 function _applyMood(m) {
   if (!_actx||!_audioOn) return;
   const t=_actx.currentTime;
@@ -901,7 +1119,8 @@ function toggleAudio() {
   if(_actx.state==='suspended')_actx.resume();
   _audioOn=!_audioOn;
   if(_gainNode)_gainNode.gain.setTargetAtTime(_audioOn?_gain():0,_actx.currentTime,1.2);
-  if(_audioOn)_applyMood(mood);
+  if(_audioOn){_applyMood(mood);setTimeout(()=>playSfx('ship_ambient_start',0.5),500);}
+  else{playSfx('ship_ambient_stop');}
   const btn=document.getElementById('audio-btn');
   if(btn){btn.textContent=_audioOn?'\u266a on':'\u266a off';btn.style.color=_audioOn?'var(--amber)':'var(--dim)';}
   emit('audioToggled',_audioOn);
@@ -916,7 +1135,154 @@ function playSfx(name,volume=0.5) {
   else if(name==='beep')_osc(660,'square',0.1,0.15);
   else console.warn(`SFX "${name}" not registered.`);
 }
-function initBuiltinSfx() {}
+function initBuiltinSfx() {
+  // Sounding settle: a warm, brief sine tone that fades — spiritual resolution
+  registerSfx('sounding_settle', (vol=0.8) => {
+    if (!_actx) return;
+    const g = _actx.createGain(); g.gain.setValueAtTime(0, _actx.currentTime);
+    g.gain.linearRampToValueAtTime(vol * 0.5, _actx.currentTime + 0.08);
+    g.gain.exponentialRampToValueAtTime(0.001, _actx.currentTime + 2.2);
+    g.connect(_gainNode);
+    // Fundamental + overtone for warmth
+    [220, 440, 660].forEach((freq, i) => {
+      const o = _actx.createOscillator();
+      o.type = 'sine'; o.frequency.value = freq;
+      const og = _actx.createGain(); og.gain.value = i === 0 ? 1 : 1/(i*3);
+      o.connect(og); og.connect(g); o.start(); o.stop(_actx.currentTime + 2.5);
+    });
+  });
+
+  // Cover fail: a brief descending dissonance — tension, something broken
+  registerSfx('cover_fail', (vol=0.7) => {
+    if (!_actx) return;
+    const g = _actx.createGain(); g.gain.setValueAtTime(vol * 0.4, _actx.currentTime);
+    g.gain.exponentialRampToValueAtTime(0.001, _actx.currentTime + 0.8);
+    g.connect(_gainNode);
+    [[340, 0], [290, 0.05], [240, 0.15]].forEach(([freq, delay]) => {
+      const o = _actx.createOscillator();
+      o.type = 'triangle'; o.frequency.value = freq;
+      const og = _actx.createGain(); og.gain.value = 0.6;
+      o.connect(og); og.connect(g);
+      o.start(_actx.currentTime + delay); o.stop(_actx.currentTime + delay + 0.6);
+    });
+  });
+
+  // Transmission: radio crackle — filtered noise bursts
+  registerSfx('transmission', (vol=0.9) => {
+    if (!_actx) return;
+    const dur = 1.8;
+    const buf = _actx.createBuffer(1, _actx.sampleRate * dur, _actx.sampleRate);
+    const d = buf.getChannelData(0);
+    for (let i = 0; i < d.length; i++) d[i] = (Math.random() * 2 - 1) * (Math.random() > 0.85 ? 1 : 0.1);
+    const src = _actx.createBufferSource(); src.buffer = buf;
+    const band = _actx.createBiquadFilter(); band.type = 'bandpass';
+    band.frequency.value = 1800; band.Q.value = 3;
+    const g = _actx.createGain(); g.gain.setValueAtTime(vol * 0.6, _actx.currentTime);
+    g.gain.exponentialRampToValueAtTime(0.001, _actx.currentTime + dur);
+    src.connect(band); band.connect(g); g.connect(_gainNode); src.start();
+  });
+
+  // Anomaly drone: a very low, sustained presence — the field
+  registerSfx('anomaly_drone', (vol=0.6) => {
+    if (!_actx) return;
+    const g = _actx.createGain(); g.gain.setValueAtTime(0, _actx.currentTime);
+    g.gain.linearRampToValueAtTime(vol * 0.3, _actx.currentTime + 1.5);
+    g.gain.exponentialRampToValueAtTime(0.001, _actx.currentTime + 5);
+    g.connect(_gainNode);
+    [40, 47, 53].forEach(freq => {
+      const o = _actx.createOscillator(); o.type = 'sine'; o.frequency.value = freq;
+      const og = _actx.createGain(); og.gain.value = 0.5;
+      o.connect(og); og.connect(g); o.start(); o.stop(_actx.currentTime + 5.5);
+    });
+  });
+
+  // Theosis moment: rising harmonic — spiritual ascent
+  registerSfx('theosis_moment', (vol=0.75) => {
+    if (!_actx) return;
+    const g = _actx.createGain(); g.gain.setValueAtTime(0, _actx.currentTime);
+    g.gain.linearRampToValueAtTime(vol * 0.4, _actx.currentTime + 0.3);
+    g.gain.exponentialRampToValueAtTime(0.001, _actx.currentTime + 3);
+    g.connect(_gainNode);
+    [330, 440, 550, 660].forEach((freq, i) => {
+      const o = _actx.createOscillator(); o.type = 'sine'; o.frequency.value = freq;
+      const og = _actx.createGain(); og.gain.value = 1 / (i + 1);
+      o.connect(og); og.connect(g);
+      o.start(_actx.currentTime + i * 0.12); o.stop(_actx.currentTime + 3.5);
+    });
+  });
+  // Ship ambient: low creaking/drone that runs continuously when audio on
+  registerSfx('ship_ambient_start', (vol=0.5) => {
+    if (!_actx) return;
+    // Low ship hum — two detuned sines + filtered noise
+    const ambGain = _actx.createGain();
+    ambGain.gain.setValueAtTime(0, _actx.currentTime);
+    ambGain.gain.linearRampToValueAtTime(vol * 0.35, _actx.currentTime + 3);
+    ambGain.connect(_gainNode);
+    window._ambientNodes = window._ambientNodes || [];
+    // Fundamental hum
+    [55, 58, 110].forEach((freq, i) => {
+      const o = _actx.createOscillator();
+      o.type = 'sine'; o.frequency.value = freq;
+      const og = _actx.createGain(); og.gain.value = i === 2 ? 0.15 : 0.5;
+      o.connect(og); og.connect(ambGain); o.start();
+      window._ambientNodes.push(o);
+    });
+    // Wind noise layer
+    const buf = _actx.createBuffer(1, _actx.sampleRate * 4, _actx.sampleRate);
+    const d = buf.getChannelData(0);
+    for (let i = 0; i < d.length; i++) d[i] = (Math.random() * 2 - 1) * 0.3;
+    const src = _actx.createBufferSource(); src.buffer = buf; src.loop = true;
+    const lp = _actx.createBiquadFilter(); lp.type = 'lowpass'; lp.frequency.value = 400;
+    const wg = _actx.createGain(); wg.gain.value = 0.08;
+    src.connect(lp); lp.connect(wg); wg.connect(ambGain); src.start();
+    window._ambientNodes.push(src);
+    window._ambientGain = ambGain;
+  });
+
+  registerSfx('ship_ambient_stop', (vol=0) => {
+    if (!_actx || !window._ambientGain) return;
+    window._ambientGain.gain.linearRampToValueAtTime(0, _actx.currentTime + 2);
+    setTimeout(() => {
+      (window._ambientNodes || []).forEach(n => { try { n.stop(); } catch(e) {} });
+      window._ambientNodes = [];
+      window._ambientGain = null;
+    }, 2500);
+  });
+
+  // Anomaly pulse: a rhythmic sub-bass throb that intensifies with deviation
+  registerSfx('anomaly_pulse', (vol=0.5) => {
+    if (!_actx) return;
+    const dev = typeof G !== 'undefined' ? (G.magneticDeviation || 0) : 0;
+    const freq = 28 + dev * 15;
+    const g = _actx.createGain();
+    g.gain.setValueAtTime(0, _actx.currentTime);
+    g.gain.linearRampToValueAtTime(vol * 0.4 * (0.3 + dev * 0.7), _actx.currentTime + 0.4);
+    g.gain.exponentialRampToValueAtTime(0.001, _actx.currentTime + 3.5);
+    g.connect(_gainNode);
+    const o = _actx.createOscillator(); o.type = 'sine'; o.frequency.value = freq;
+    const o2 = _actx.createOscillator(); o2.type = 'sine'; o2.frequency.value = freq * 1.5;
+    const og2 = _actx.createGain(); og2.gain.value = 0.3;
+    o.connect(g); o2.connect(og2); og2.connect(g);
+    o.start(); o.stop(_actx.currentTime + 4);
+    o2.start(); o2.stop(_actx.currentTime + 4);
+  });
+
+  // Radio static: Landstorm's channel
+  registerSfx('radio_static', (vol=0.6) => {
+    if (!_actx) return;
+    const dur = 0.6;
+    const buf = _actx.createBuffer(1, _actx.sampleRate * dur, _actx.sampleRate);
+    const d = buf.getChannelData(0);
+    for (let i = 0; i < d.length; i++) d[i] = (Math.random() * 2 - 1) * (i/d.length < 0.1 || i/d.length > 0.85 ? 0.05 : 0.9);
+    const src = _actx.createBufferSource(); src.buffer = buf;
+    const band = _actx.createBiquadFilter(); band.type = 'bandpass';
+    band.frequency.value = 2200; band.Q.value = 5;
+    const g = _actx.createGain(); g.gain.setValueAtTime(vol * 0.7, _actx.currentTime);
+    g.gain.exponentialRampToValueAtTime(0.001, _actx.currentTime + dur);
+    src.connect(band); band.connect(g); g.connect(_gainNode); src.start();
+  });
+
+}
 
 // ============================================================
 // SECTION: systems/history.js
@@ -1006,11 +1372,14 @@ function saveGameSlot(slotId) {
       codexUnlocked: [...G.codexUnlocked],
       ambientTriggered: [...G.ambientTriggered],
       magneticDeviation: G.magneticDeviation || 0,
+      audioOn: _audioOn,
+      gameMode: G.mode,
       worldState: G.worldState || { shipStability: 5, sanctity: 0, socialTrust: 5 },
+      shipState: G.shipState || { morale: 5, paranoia: 0, exhaustion: 0, saturation: 0 },
     };
     try { localStorage.setItem(SAVE_KEY_PREFIX + slotId, JSON.stringify(state)); } catch(e) { console.warn('Save write failed:', e); showToast('Save failed — storage full?', 'warning'); return; }
     saveJournal(slotId);
-    showToast(`Saved to slot ${slotId}`, 'note');
+    if(slotId!=='legacy') showToast('Saved.', 'note');
     emit('saveSlot', slotId);
   } catch (e) { console.warn('Save failed:', e); }
 }
@@ -1057,7 +1426,10 @@ function loadGameSlot(slotId) {
     G.codexUnlocked    = new Set(s.codexUnlocked   || []);
     G.ambientTriggered = new Set(s.ambientTriggered || []);
     G.magneticDeviation = s.magneticDeviation !== undefined ? s.magneticDeviation : 0;
+    if (s.audioOn !== undefined) { _audioOn = s.audioOn; }
+    if (s.gameMode) { G.mode = s.gameMode; }
     G.worldState = s.worldState || { shipStability: 5, sanctity: 0, socialTrust: 5 };
+    G.shipState  = s.shipState  || { morale: 5, paranoia: 0, exhaustion: 0, saturation: 0 };
     loadJournal(slotId);
     refreshAtmosMods();
     scheduleRender();
@@ -1137,7 +1509,7 @@ function loadJournal(slotId) {
   catch (e) { G.journal = []; }
 }
 function renderJournalPanel(root, openPanelFn) {
-  const overlay = document.createElement('div'); overlay.className = 'panel-overlay';
+  const overlay = document.createElement('div'); overlay.className = 'panel-overlay'; overlay.setAttribute('role','dialog'); overlay.setAttribute('aria-modal','true');
   overlay.onclick = (e) => { if (e.target === overlay) openPanelFn(null); };
   const panel = document.createElement('div'); panel.className = 'panel';
   const hdr = document.createElement('div'); hdr.className = 'panel-header';
@@ -1164,7 +1536,7 @@ function renderJournalPanel(root, openPanelFn) {
       row.appendChild(meta); row.appendChild(text); body.appendChild(row);
     });
   }
-  panel.appendChild(body); overlay.appendChild(panel); root.appendChild(overlay);
+  panel.appendChild(body); overlay.appendChild(panel); document.body.appendChild(overlay);
 }
 
 
@@ -1173,9 +1545,9 @@ function renderJournalPanel(root, openPanelFn) {
 // ============================================================
 
 function addCompanion(id, data) {
-  if (!G.companions.find(c => c.id === id)) { G.companions.push({ id, ...data }); saveGameLegacy(); emit('companionAdded', id); }
+  if (!G.companions.find(c => c.id === id)) { G.companions.push({ id, ...data }); emit('companionAdded', id); }
 }
-function removeCompanion(id) { G.companions = G.companions.filter(c => c.id !== id); saveGameLegacy(); emit('companionRemoved', id); }
+function removeCompanion(id) { G.companions = G.companions.filter(c => c.id !== id); emit('companionRemoved', id); }
 function hasCompanion(id) { return G.companions.some(c => c.id === id); }
 function getCompanion(id) { return G.companions.find(c => c.id === id); }
 function modCompanionStat(id, stat, delta) {
@@ -1304,13 +1676,15 @@ function renderRitual(root) {
   if (phase.text) {
     let raw=Array.isArray(phase.text)?phase.text:[phase.text];
     raw=raw.map(applyLinguisticToggle).map(applyPostEventShifts);
-    raw.forEach(line=>{const p=document.createElement('p');p.className='sp';p.innerHTML=processText(line);body.appendChild(p);});
+    const _ml=injectMicroLines(raw,G.scene); _ml.forEach(line=>{const p=document.createElement('p');p.className='sp';p.innerHTML=processText(injectGhostText(line,G.scene));body.appendChild(p);});
   }
   const cd=document.createElement('div'); cd.className='choices';
   if (phase.ritualChoices) {
     phase.ritualChoices.forEach(ch=>{
       const btn=document.createElement('button'); btn.className='choice'+(ch.style==='sacrifice'?' choice-sacrifice':'');
+      const _chNum=++_choiceIdx;
       btn.textContent=processText(ch.text);
+      if(_chNum<=9){btn.setAttribute('data-key',_chNum);btn.setAttribute('aria-keyshortcuts',String(_chNum));}
       btn.onclick=()=>{if(ch.effect)applyEffect(ch.effect);if(ch.set_flag)setFlag(ch.set_flag);_activeRitual.choicesMade.push({phase:_activeRitual.phaseIndex,choice:ch.text,branch:ch.branch});ritualNextPhase(ch.branch);};
       cd.appendChild(btn);
     });
@@ -1340,15 +1714,61 @@ function navigate(id) {
   G._mortificationSpent   = false;
   G._dialogue             = null;
   G._coverChallenge       = null;
-  tickSoundings();
+  // tickSoundings removed from navigate — progress only via progressSounding()
   _captureSnapshot();
   tickDelayedConsequences();
-  window.scrollTo(0, 0);
   scheduleRender();
+  // Re-apply persistent UI classes from ship state
+  if(G.shipState){
+    document.body.classList.toggle('ship-paranoid',  (G.shipState.paranoia||0)>=4);
+    document.body.classList.toggle('ship-exhausted', (G.shipState.exhaustion||0)>=5);
+    document.body.classList.toggle('ship-low-morale',(G.shipState.morale||5)<=3);
+  }
+  // Close panel immediately on navigation (no animation — scene change takes priority)
+  if (G.panelOpen) {
+    G.panelOpen = null;
+    const _ov = document.querySelector('.panel-overlay');
+    if (_ov) { _ov.classList.remove('open'); _ov.remove(); }
+  }
   emit('sceneChanged', id);
 }
 
-function openPanel(w) { G.panelOpen = G.panelOpen === w ? null : w; scheduleRender(); }
+function openPanel(w) {
+  const prev = G.panelOpen;
+  G.panelOpen = (w && prev === w) ? null : w;
+  // If closing: animate out first, then remove
+  if (!G.panelOpen && prev) {
+    const ov = document.querySelector('.panel-overlay');
+    if (ov) {
+      ov.classList.remove('open');
+      setTimeout(() => { ov.remove(); }, 250);
+    }
+  } else {
+    // Remove any existing overlay immediately before opening new one
+    document.querySelectorAll('.panel-overlay').forEach(el => el.remove());
+    if (G.panelOpen) {
+      const _root = document.getElementById('root');
+      if (_root) _renderPanel(G.panelOpen, _root);
+    }
+  }
+  scheduleRender(); // update nav active states
+}
+function _renderPanel(po, root) {
+  if(po==='notes')    _renderNotesPanel(root);
+  else if(po==='status')   _renderStatusPanel(root);
+  else if(po==='breviary') _renderBreviaryPanel(root);
+  else if(po==='glossary') _renderNotesPanel(root);
+  else if(po==='map')      _renderMapPanelSide(root);
+  else if(po==='calendar') _renderCalendarPanel(root);
+  else if(po==='journal')  renderJournalPanel(root, openPanel);
+  else if(po==='log')      renderEventLogPanel(root, openPanel);
+  else if(po==='codex')    renderCodexPanel(root, openPanel);
+  // Trigger CSS transition: add 'open' class after one frame
+  requestAnimationFrame(() => {
+    const ov = document.querySelector('.panel-overlay');
+    if (ov) ov.classList.add('open');
+  });
+}
 function returnToTitle() { G.phase = 'title'; scheduleRender(); }
 
 let _processingChoice = false;
@@ -1402,7 +1822,10 @@ function applyChoice(ch) {
     if (consequenceRedirected || deadlineRedirect) { emit('choiceApplied', ch); return; }
     if (ch.next === '__new_play__') { newPlay(); return; }
     if (ch.start_ritual) { const [rid,sscene,nscene] = ch.start_ritual; startRitual(rid, sscene, nscene); return; }
-    if (ch.next) navigate(ch.next);
+    if (ch.next) {
+    _lastScrolledScene = null; // force scroll even if scene id is unchanged
+    navigate(ch.next);
+  }
     emit('choiceApplied', ch);
   } finally { _processingChoice = false; }
 }
@@ -1410,12 +1833,42 @@ function applyChoice(ch) {
 function newPlay() {
   addCrossingEntry();
   const currentFlags = [...G.flags];
-  // Crossing Tax: the body forgets 15 points. The soul does not forget all of it.
   const carriedTheosis = Math.max(5, Math.min(85, G.theosis - 15));
-  const preserve = { theosis: carriedTheosis, metaUnlocks: G.metaUnlocks, playCount: G.playCount+1, pastFlags: currentFlags, journal: G.journal };
+
+  // ── META PERSISTENCE ─────────────────────────────────────────
+  // Store the waking charism carried from this crossing
+  const wakingCharisms = (_registries.charisms.waking || []).map(c => c.id);
+  const lastWakingCharism = G.charisms.find(c => wakingCharisms.includes(c));
+  if (lastWakingCharism) G.metaUnlocks['lastCharism_' + G.playCount] = lastWakingCharism;
+
+  // Increment transmission count for anomaly-grows arc
+  if (currentFlags.includes('archive_transmitted')) {
+    G.metaUnlocks.transmissionCount = (G.metaUnlocks.transmissionCount || 0) + 1;
+  }
+
+  // Store which Lena fragment was seen
+  for (let i = 1; i <= 5; i++) {
+    if (currentFlags.includes('lena_fragment_' + i + '_seen')) {
+      G.metaUnlocks['lena_fragment_' + i] = true;
+    }
+  }
+
+  // Pick crew variant for next crossing (cycles through available variants)
+  const nextVariant = ((G.metaUnlocks.crewVariant || 0) + 1) % 3;
+  G.metaUnlocks.crewVariant = nextVariant;
+
+  const preserve = {
+    theosis: carriedTheosis,
+    metaUnlocks: G.metaUnlocks,
+    playCount: G.playCount + 1,
+    pastFlags: currentFlags,
+    journal: G.journal
+  };
   resetG(preserve);
   G.pastLifeFlags = new Set(currentFlags);
-  G.scene = getInitialScene(); G.phase = 'charism';
+  // On second+ crossing, wake scene is the crossing tax lived experience
+  G.scene = G.playCount > 1 ? 'crossing_tax_lived' : getInitialScene();
+  G.phase = 'charism';
   refreshAtmosMods(); _captureSnapshot(); emit('newPlay'); scheduleRender();
 }
 
@@ -1528,7 +1981,7 @@ function renderCodexPanel(root,openPanelFn) {
       });
     });
   }
-  panel.appendChild(body);overlay.appendChild(panel);root.appendChild(overlay);
+  panel.appendChild(body);overlay.appendChild(panel);document.body.appendChild(overlay);
 }
 
 
@@ -1558,6 +2011,12 @@ function startCoverChallenge(field) {
   G._coverChallenge={field,prompt,difficulty,pressured};
   emit('coverChallengeStarted',{field,prompt,difficulty});scheduleRender();
 }
+function visibleRollHtml(result) {
+  const cls = result.outcome === 'success' ? 'roll-success' : result.outcome === 'partial' ? 'roll-partial' : 'roll-fail';
+  const labels = { success: 'holds', partial: 'holds — at cost', failure: 'fails' };
+  return `<span class="visible-roll ${cls}">[${result.d1}·${result.d2}] + ${result.statValue} = ${result.total} — ${labels[result.outcome]||result.outcome}</span>`;
+}
+
 function resolveCoverChallenge(action) {
   if(!G._coverChallenge)return;
   const{field,difficulty}=G._coverChallenge;
@@ -1569,16 +2028,37 @@ function resolveCoverChallenge(action) {
   if(result.outcome==='success'){
     G.flags.delete(`__cover_pressured_${field}`);showToast(`Cover holds. ${_fieldLabels[field]||field} is secure.`,'note');emit('coverChallengeSuccess',{field,result});
   }else if(result.outcome==='partial'){
+    G.flags.delete(`__cover_pressured_${field}`); // partial clears pressure — it cost something but holds
     const before=G.stats.composure||0;G.stats.composure=Math.max(0,before-1);
     if(G.stats.composure!==before)emit('statChanged',{stat:'composure',delta:-1});
     showToast(`You hold \u2014 barely. ${_fieldLabels[field]||field} costs you.`,'note');emit('coverChallengePartial',{field,result});
   }else{
     degradeCover(1);G.flags.add(`__cover_pressured_${field}`);
-    showToast(`Cover questioned. ${_fieldLabels[field]||field} is under suspicion.`,'note');emit('coverChallengeFailure',{field,result});
+    showToast(`Cover questioned. ${_fieldLabels[field]||field} is under suspicion.`,'note');playSfx('cover_fail');emit('coverChallengeFailure',{field,result});
   }
   G._coverChallenge={...G._coverChallenge,result,resolved:true};scheduleRender();
 }
-function dismissCoverChallenge(){G._coverChallenge=null;scheduleRender();}
+function dismissCoverChallenge(){
+  const ch = G._coverChallenge;
+  G._coverChallenge = null;
+  if (ch && ch.resolved && ch.result) {
+    const key = `_cover_outcome_${ch.field}_${ch.result.outcome}`;
+    if (G.flags.has(key)) { scheduleRender(); return; }
+    G.flags.add(key);
+    // Navigate to field-specific outcome scene if registered
+    const outcomeScene = `cover_${ch.field}_${ch.result.outcome}`;
+    if (_registries.scenes && _registries.scenes[outcomeScene]) {
+      navigate(outcomeScene); return;
+    }
+    // Fallback to generic outcome scene
+    const genericScene = `cover_challenge_${ch.result.outcome}`;
+    if (_registries.scenes && _registries.scenes[genericScene]) {
+      navigate(genericScene); return;
+    }
+  }
+  saveGameLegacy();
+  scheduleRender();
+}
 
 function renderCoverChallengeOverlay(root,processTextFn) {
   if(!G._coverChallenge)return false;
@@ -1600,9 +2080,24 @@ function renderCoverChallengeOverlay(root,processTextFn) {
   }else if(result){
     const res=document.createElement('div');
     res.className=`cover-challenge-result ${result.outcome==='success'?'roll-success':result.outcome==='partial'?'roll-partial':'roll-fail'}`;
-    res.textContent=`[${result.d1}]+[${result.d2}]=${result.roll}+${result.statValue}=${result.total} \u2014 ${result.outcome.toUpperCase()}`;
+    // Dice display
+    const diceRow = document.createElement('div'); diceRow.className='challenge-dice';
+    diceRow.innerHTML = `<span class="die">${result.d1}</span><span class="die">${result.d2}</span> + ${result.statValue} = ${result.total}`;
+    box.appendChild(diceRow);
+    // Outcome narrative
+    // Logbook notation: "bearing · total 14 · holds"
+    const outcomeLabels = {
+      success: 'holds',
+      partial:  'holds — at cost',
+      failure:  'does not hold',
+    };
+    const fieldLabel = field ? (field.charAt(0).toUpperCase()+field.slice(1)) : 'Cover';
+    const integrityText = G.coverIntegrity !== undefined ? `  ◈ ${G.coverIntegrity}` : '';
+    res.textContent = `${fieldLabel} · total ${result.total} · ${outcomeLabels[result.outcome]||result.outcome}${integrityText}`;
+    if (result.charismNote) { const cn=document.createElement('div');cn.className='challenge-charism';cn.textContent=result.charismNote;box.appendChild(cn); }
     box.appendChild(res);
-    const cont=document.createElement('button');cont.className='btn';cont.textContent='Continue';cont.onclick=dismissCoverChallenge;box.appendChild(cont);
+    const cont=document.createElement('button');cont.className='btn';cont.style.cssText='margin-top:1rem;width:100%';
+    cont.textContent='Continue'; cont.onclick=dismissCoverChallenge; box.appendChild(cont);
   }
   overlay.appendChild(box);root.appendChild(overlay);return true;
 }
@@ -1644,10 +2139,22 @@ function renderDialogue(root,processTextFn) {
     beat.choices.forEach(dc=>{const btn=document.createElement('button');btn.className='choice dialogue-choice';btn.textContent=processTextFn?processTextFn(dc.text):dc.text;btn.onclick=()=>selectDialogueChoice(dc);cd.appendChild(btn);});
     wrap.appendChild(cd);
   }else if(beat.speaker){
-    _renderNpcBeat(wrap,beat.speaker,beat.text,processTextFn);wrap.appendChild(_continueBtn(()=>advanceDialogue()));
+    // NPC speech: render this beat and stop — one exchange per advance
+    _renderNpcBeat(wrap,beat.speaker,beat.text,processTextFn);
+    wrap.appendChild(_continueBtn(()=>advanceDialogue()));
   }else if(beat.text){
-    const p=document.createElement('p');p.className='sp dialogue-narration';p.innerHTML=processTextFn?processTextFn(beat.text):beat.text;
-    wrap.appendChild(p);wrap.appendChild(_continueBtn(()=>advanceDialogue()));
+    // Narration beat: batch ALL consecutive narration beats into one render
+    // Only stop when we hit a speaker beat, choices, or end of dialogue
+    let i=beatIndex;
+    while(i<beats.length && beats[i] && !beats[i].speaker && !beats[i].choices && beats[i].text){
+      const p=document.createElement('p');p.className='sp dialogue-narration';
+      p.innerHTML=processTextFn?processTextFn(beats[i].text):beats[i].text;
+      wrap.appendChild(p);
+      i++;
+    }
+    // Advance the beat index to where we stopped
+    G._dialogue.beatIndex=i-1; // advanceDialogue will +1 from here
+    wrap.appendChild(_continueBtn(()=>advanceDialogue()));
   }else{advanceDialogue();return;}
   root.appendChild(wrap);
 }
@@ -1748,7 +2255,7 @@ function renderEventLogPanel(root,openPanelFn){
       row.appendChild(typeEl);row.appendChild(dataEl);row.appendChild(sceneEl);body.appendChild(row);
     });
   }
-  panel.appendChild(body);overlay.appendChild(panel);root.appendChild(overlay);
+  panel.appendChild(body);overlay.appendChild(panel);document.body.appendChild(overlay);
 }
 
 
@@ -1883,7 +2390,24 @@ function resolveTextBlock(textBlock){
 }
 function getSceneText(scene){return resolveTextBlock(scene.text);}
 function resolveLayeredText(scene){return getSceneText(scene);}
-function injectMicroLines(a,_s){return a;}
+function injectMicroLines(lines, sceneId) {
+  // At very high theosis (Illumined tier), inject faint environmental lines
+  const t = G.theosis || 0;
+  const dev = G.magneticDeviation || 0;
+  if (t < 66 && dev < 0.6) return lines;
+  // Append a very faint micro-observation to the last paragraph
+  const microLines = {
+    'foredeck_standing':    'The compass needle holds its deviation. It has been holding for six hours.',
+    'hold_boxes':           'Freezer Beef adjusts her position by one inch. She does not explain this.',
+    'instrument_shimmer':   'The porthole light has a quality that is not weather.',
+    'anomaly_peak':         'The instruments have been correct about everything so far.',
+    'cabin_porthole_stay':  'The sea is the same sea it was before the crossing. It is not the same sea.',
+    'lena_silence':         'The coffee is the right temperature. It is always the right temperature.',
+  };
+  const micro = microLines[sceneId];
+  if (!micro || Math.random() > 0.6) return lines;
+  return [...lines, `<span class="micro-line">${micro}</span>`];
+}
 const _toggleMemo = new Map();
 function applyLinguisticToggle(t){
   const doubt = G.stats.doubt || 0;
@@ -1905,13 +2429,59 @@ function applyLinguisticToggle(t){
 }
 // Clear memo on navigation
 function _clearToggleMemo() { _toggleMemo.clear(); }
-function applyPostEventShifts(t){return t;}
-function applyPastLifeLines(a,_id){return a;}
-function injectGhostText(t,_id){return t;}
+function applyPostEventShifts(t) {
+  if (!t || !_registries.postEventShifts || !_registries.postEventShifts.length) return t;
+  let result = t;
+  for (const shift of _registries.postEventShifts) {
+    if (!G.flags.has(shift.triggerFlag)) continue;
+    for (const p of (shift.patterns || [])) {
+      if (p.pattern && p.replacement) {
+        result = result.replace(new RegExp(_escapeRe(p.pattern), 'g'), p.replacement);
+      }
+    }
+  }
+  return result;
+}
+function applyPastLifeLines(text, sceneId) {
+  if (!text || G.playCount <= 1) return text;
+  const lines = _registries.pastLifeLines[sceneId];
+  if (!lines || !lines.length) return text;
+  let result = text;
+  for (const entry of lines) {
+    if (!entry.pattern || !entry.replacement) continue;
+    result = result.replace(new RegExp(_escapeRe(entry.pattern), 'g'), entry.replacement);
+  }
+  return result;
+}
+function injectGhostText(t, sceneId) {
+  // At high deviation + high doubt, inject ghost fragments into scene text
+  const dev = G.magneticDeviation || 0;
+  const doubt = G.stats.doubt || 0;
+  if (dev < 0.7 && doubt < 6) return t;
+  const intensity = Math.min(1, (dev - 0.5) * 2 + (doubt - 4) * 0.1);
+  if (Math.random() > intensity * 0.4) return t;
+  // Ghost fragments that bleed through at anomaly peak
+  const ghosts = [
+    '\n<span class="ghost-line">( the field receives )</span>',
+    '\n<span class="ghost-line">( something below is listening )</span>',
+    '\n<span class="ghost-line">( thirty years )</span>',
+    '\n<span class="ghost-line">( Заря )</span>',
+    '\n<span class="ghost-line">( the record persists )</span>',
+  ];
+  // Insert one ghost line into the text at a paragraph boundary
+  const para = t.lastIndexOf('\n\n');
+  if (para < 0) return t;
+  const ghost = ghosts[Math.floor(Math.random() * ghosts.length)];
+  return t.slice(0, para) + ghost + t.slice(para);
+}
 function processText(raw){
   if(typeof raw==='function')raw=raw(G);
   if(typeof raw!=='string')return'';
-  return applyNameMapping(raw.replace(/\{ICON\}/g,iconWord()));
+  let t = raw.replace(/\{ICON\}/g,iconWord());
+  t = applyPostEventShifts(t);
+  t = applyPastLifeLines(t, G.scene);
+  t = applyNameMapping(t);
+  return t;
 }
 
 
@@ -1972,7 +2542,14 @@ function renderMapPanel(){
   let s='';for(const[id,d]of Object.entries(_registries.mapNodes)){s+=`${d.visited?'\u25c9':'\u25cb'} ${id}\n`;if(d.connections&&d.connections.length)s+=`  \u2514\u2500 connects to: ${d.connections.join(', ')}\n`;}
   return`<pre style="font-size:.7rem;font-family:monospace">${s}</pre>`;
 }
-function markMapNodeVisited(id){if(_registries.mapNodes[id])_registries.mapNodes[id].visited=true;}
+function markMapNodeVisited(id){if(_registries.mapNodes[id]){_registries.mapNodes[id].visited=true;setFlag('visited_'+id);}}
+function isNodeVisited(id){return !!((_registries.mapNodes[id]&&_registries.mapNodes[id].visited)||G.flags.has('visited_'+id)||G.pastLifeFlags&&G.pastLifeFlags.has('visited_'+id));}
+function isNodeKnown(id){
+  // Known = visited this crossing OR visited in past life (Witness charism)
+  if(isNodeVisited(id)) return true;
+  if(G.charisms&&G.charisms.includes('witness')&&G.pastLifeFlags&&G.pastLifeFlags.has('visited_'+id)) return true;
+  return false;
+}
 
 // ============================================================
 // SECTION: ui/renderer.js
@@ -1997,11 +2574,12 @@ function renderTitle(root){
   const replay=G.playCount>0,hasSave=!!localStorage.getItem(SAVE_KEY_PREFIX+'legacy'),isDemo=typeof IS_DEMO!=='undefined'&&IS_DEMO;
   const d=document.createElement('div');d.className='title-screen';
   d.innerHTML=`
-    <div class="title-cyrillic">${window.GAME_TITLE||'GAME'}</div>
-    <div style="font-family:'GOST type B','Share Tech Mono',monospace;font-size:.7rem;color:var(--dim);letter-spacing:.3em;text-transform:uppercase;margin-bottom:.2rem">${window.GAME_SUBTITLE||''}</div>
+    <div class="title-plate">
+    <div class="title-cyrillic">${window.GAME_TITLE||'СПАСИБО'}</div>
+    </div>
     <div style="font-family:'GOST type B','Share Tech Mono',monospace;font-size:.66rem;color:var(--amber-dim);letter-spacing:.22em;margin-bottom:${isDemo?'1.2':'2'}rem">${window.GAME_MOTTO||'Thank You'}</div>
     ${isDemo?'<div style="font-size:.8rem;color:var(--amber);border:1px solid var(--amber-dim);padding:.5rem 1.2rem;margin-bottom:2.5rem">DEMO VERSION \u2014 Act One Only</div>':''}
-    <pre class="title-ship-art" style="font-family:'GOST type B','Share Tech Mono',monospace;font-size:.62rem;color:var(--cold-dim);white-space:pre;line-height:1.25;margin-bottom:2.5rem;text-align:center;opacity:0.7">
+    <pre class="title-ship-art">
       |    |    |
      )_)  )_)  )_)
     )___))___))___)\\
@@ -2040,30 +2618,38 @@ function renderMode(root) {
   clearIdleTimer();
   const d = document.createElement('div'); d.className = 'title-screen';
   const modes = _registries.availableModes || ['attended', 'witnessed'];
-  const modeDesc = {
-    attended:  { label: 'Attended',  desc: 'The full crossing. Choices matter. The ship keeps score.' },
-    witnessed: { label: 'Witnessed', desc: 'You observe. Composure does not advance. The record is kept.' },
-    open:      { label: 'Open',      desc: 'No restrictions. Everything is available.' },
+  const reg = _registries.modeDescriptions || {};
+  const fallback = {
+    attended:  { name:'Attended',  long:'Standard play. Your choices matter. The ship keeps score. Cover can fail. All five endings are reachable. Choose this for your first crossing.' },
+    witnessed: { name:'Witnessed', long:'A quieter mode. Cover challenges resolve automatically. The story draws on your history more than your moment-to-moment choices. Choose this if you want the narrative without the mechanical pressure.' },
+    open:      { name:'Open',      long:'No restrictions. Everything is available.' },
   };
-  d.innerHTML = `
-    <div style="font-size:.62rem;color:var(--dim);letter-spacing:.22em;text-transform:uppercase;margin-bottom:2rem">How do you cross?</div>
-    <div style="display:flex;flex-direction:column;gap:.7rem;width:100%;max-width:360px">
-      ${modes.map(m => `
-        <button class="btn mode-btn" data-mode="${m}" style="text-align:left;padding:.8rem 1rem">
-          <div style="font-size:.8rem;color:var(--fg);letter-spacing:.08em;margin-bottom:.3rem">${(modeDesc[m]||{label:m}).label}</div>
-          <div style="font-size:.72rem;color:var(--dim);font-style:italic">${(modeDesc[m]||{desc:''}).desc}</div>
-        </button>`).join('')}
-    </div>`;
-  root.appendChild(d);
-  d.querySelectorAll('.mode-btn').forEach(btn => {
-    btn.addEventListener('click', () => {
-      G.mode = btn.dataset.mode;
-      G.phase = 'charism';
-      render();
-    });
-  });
-}
 
+  const heading = document.createElement('div');
+  heading.style.cssText = 'font-size:.62rem;color:var(--dim);letter-spacing:.22em;text-transform:uppercase;margin-bottom:2rem;font-family:var(--font-display)';
+  heading.textContent = 'How do you cross?';
+  d.appendChild(heading);
+
+  const btnWrap = document.createElement('div');
+  btnWrap.style.cssText = 'display:flex;flex-direction:column;gap:.7rem;width:100%;max-width:380px';
+  modes.forEach(m => {
+    const md = reg[m] || fallback[m] || { name: m, long: '' };
+    const btn = document.createElement('button');
+    btn.className = 'btn mode-btn';
+    btn.style.cssText = 'text-align:left;padding:.9rem 1.1rem;display:flex;flex-direction:column;gap:.35rem';
+    const nameEl = document.createElement('div');
+    nameEl.style.cssText = 'font-size:.82rem;color:var(--fg);letter-spacing:.06em';
+    nameEl.textContent = md.name || m;
+    const descEl = document.createElement('div');
+    descEl.style.cssText = 'font-size:.74rem;color:var(--dim);line-height:1.65;font-style:italic';
+    descEl.textContent = md.long || md.short || '';
+    btn.appendChild(nameEl); btn.appendChild(descEl);
+    btn.addEventListener('click', () => { G.mode = m; G.phase = 'charism'; render(); });
+    btnWrap.appendChild(btn);
+  });
+  d.appendChild(btnWrap);
+  root.appendChild(d);
+}
 function renderCharism(root) {
   clearIdleTimer();
   const isReplay = G.playCount > 0;
@@ -2172,16 +2758,32 @@ function _renderTutorial(root){
   const div=document.createElement('div');div.className='tutorial-overlay';
   div.setAttribute('role','dialog');
   div.setAttribute('aria-label','Before you board');
-  // Tap backdrop to dismiss on mobile
   div.addEventListener('click',(e)=>{if(e.target===div)dismissTutorial();});
-  const boxHtml = _registries.tutorialContent || `
+
+  const isWitnessed = G.mode === 'witnessed';
+  const modeNote = isWitnessed
+    ? '<div class="tutorial-mode-note">Witnessed mode — cover challenges resolve automatically. You are here to observe.</div>'
+    : '';
+
+  const customContent = _registries.tutorialContent;
+  const boxHtml = customContent || `
     <div class="tutorial-h">Before you board</div>
-    <div class="tutorial-item"><strong>Stats</strong> \u2014 top of screen. Bearing, Stillness, Solidarity, Static.</div>
-    <div class="tutorial-item"><strong>Cover</strong> \u2014 build it through conversation. Be consistent.</div>
-    <div class="tutorial-item"><strong>Breviary</strong> \u2014 bottom centre. Soundings settle through choices.</div>
-    <div class="tutorial-item"><strong>Observations / Status / Codex / Map</strong> \u2014 bottom row.</div>
-    <div class="tutorial-item" style="color:var(--dim);font-size:.78rem;margin-top:.6rem">Multiple crossings. What carries forward depends on how far you have come.</div>`;
-  div.innerHTML=`<div class="tutorial-box">${boxHtml}<button class="btn" style="margin-top:1.5rem;width:100%;min-height:48px;font-size:1rem" id="dt">Board the ship</button></div>`;
+    ${modeNote}
+    <div class="tutorial-section">The cover</div>
+    <div class="tutorial-item">You are the ship's chaplain. This is a cover. Build it through conversation — be consistent, don't over-explain. It is confirmed by others believing it, not by you asserting it.</div>
+    ${isWitnessed ? '' : '<div class="tutorial-item"><em>When your cover is questioned, a Challenge appears. Roll Composure. Success holds clean. Partial holds but costs. Failure shifts something.</em></div>'}
+    <div class="tutorial-section">The stats</div>
+    <div class="tutorial-item"><strong>Vigilance</strong> — what you notice before it becomes a problem.</div>
+    <div class="tutorial-item"><strong>Composure</strong> — what you can hold under pressure. Used in cover challenges.</div>
+    <div class="tutorial-item"><strong>Communion</strong> — how much the crew trusts you collectively. Opens paths.</div>
+    <div class="tutorial-item"><strong>Doubt</strong> — accumulates when the cover strains. Keep it low.</div>
+    <div class="tutorial-section">Theosis &amp; soundings</div>
+    <div class="tutorial-item">Theosis rises through contemplation, witness, and honest choices. Watch the porthole — it changes at 33 and 66. Soundings are moments of recognition; take them in the Breviary and they settle over time.</div>
+    <div class="tutorial-section">Navigation</div>
+    <div class="tutorial-item">Bottom row: Record · Status · Breviary · Calendar · Map. Keys 1–9 select choices. Escape closes panels. ? for this reference.</div>
+    <div class="tutorial-item" style="color:var(--dim);font-size:.78rem;margin-top:.6rem">The crossing takes three days. What you carry forward depends on how far you have come.</div>
+  `;
+  div.innerHTML='<div class="tutorial-box">'+boxHtml+'<button class="btn" style="margin-top:1.5rem;width:100%;min-height:48px;font-size:1rem" id="dt">Board the ship</button></div>';
   div.querySelector('#dt').addEventListener('click',dismissTutorial);
   root.appendChild(div);
 }
@@ -2230,20 +2832,39 @@ function renderGame(root){
     const scene=getScene(G.scene);
     if(scene){const wrap=document.createElement('div');wrap.className='game';wrap.appendChild(_buildHeader(scene));const body=document.createElement('div');body.className='game-body';renderCoverChallengeOverlay(body,processText);body.appendChild(_buildRestartBar());wrap.appendChild(body);root.appendChild(wrap);}
     else{renderCoverChallengeOverlay(root,processText);}
-    _appendAudioBtn(root);_appendBottomNav(root);return;
+    _appendAudioBtn(root);
+  // Atmos toggle in page footer (not overlaid)
+  if (!document.getElementById('_atmos_btn')) {
+    const _ab = document.createElement('button'); _ab.id='_atmos_btn'; _ab.className='atmos-toggle';
+    _ab.textContent = _atmosEnabled ? 'canvas on' : 'canvas off';
+    _ab.onclick = toggleAtmos; _ab.title = 'Toggle atmospheric animation';
+    _ab.setAttribute('aria-label', 'Toggle atmospheric canvas animation');
+    root.appendChild(_ab);
+  }_appendBottomNav(root);return;
   }
   processConsequenceQueue();resetIdleTimer();
   const scene=getScene(G.scene);
   if(!scene){_registries.sceneNotFound(G.scene,root);return;}
   const liturgical=LITURGICAL_HOURS[G.liturgicalHour];
+  const _sceneMood = (liturgical ? liturgical.mood : scene.mood) || 'neutral';
   if(liturgical)setMood(liturgical.mood);else setMood(scene.mood||'neutral');
-  saveGameLegacy();
+  // Apply mood body class for CSS mood-responsive text
+  document.body.classList.remove('mood-neutral','mood-revelation','mood-uncanny','mood-tense');
+  document.body.classList.add('mood-'+_sceneMood);
   const visitKey='visited_'+G.scene,firstVisit=!hasFlag(visitKey);
   if(firstVisit){setFlag(visitKey);if(scene.on_enter){if(scene.on_enter.note)addNote(scene.on_enter.note);if(scene.on_enter.flag)setFlag(scene.on_enter.flag);if(scene.on_enter.thought)offerSounding(scene.on_enter.thought);}
   // Support arbitrary onEnter function — first visit only
   if(typeof scene.onEnter === 'function') { try { scene.onEnter(); } catch(e) { console.error('[SOBORNOST] onEnter error in scene', G.scene, e); } }
   }
-  const wrap=document.createElement('div');wrap.className='game';
+  // Check for custom render override (e.g. crossing_record screen)
+  if (scene && typeof scene._renderOverride === 'function') {
+    // Fire onEnter for this scene (normally fires in main render path)
+    const _ovKey='_visited_'+G.scene;
+    if(!G[_ovKey]){G[_ovKey]=true;if(typeof scene.onEnter==='function'){try{scene.onEnter();}catch(e){console.error(e);}}}
+    scene._renderOverride(root);
+    return;
+  }
+  const wrap=document.createElement('div');wrap.className='game';wrap.setAttribute('role','main');wrap.setAttribute('aria-label','Spasibo — game content');
   const uiOp=getUiOpacity();if(uiOp<1)wrap.style.opacity=uiOp;
   wrap.appendChild(_buildHeader(scene));
   const body=document.createElement('div');body.className='game-body';
@@ -2274,8 +2895,9 @@ function renderGame(root){
   body.appendChild(stxt);
   if(G._dialogue){renderDialogue(body,processText);body.appendChild(_buildRestartBar());wrap.appendChild(body);root.appendChild(wrap);_appendAudioBtn(root);_appendBottomNav(root);return;}
   const cd=document.createElement('div');cd.className='choices';
-  if(scene.return_to){const rb=document.createElement('button');rb.className='choice choice-return';rb.textContent=scene.return_label||'Return.';rb.onclick=()=>navigate(scene.return_to);cd.appendChild(rb);}
+  if(scene.return_to){const rb=document.createElement('button');rb.className='choice choice-return';rb.textContent=scene.return_label||'Return.';rb.onclick=()=>{_lastScrolledScene=null;navigate(scene.return_to);};cd.appendChild(rb);}
   if(scene.choices){
+    let _choiceIdx=0;
     scene.choices.forEach(ch=>{
       if(ch.hide_if&&hasFlag(ch.hide_if))return;if(ch.show_if&&!hasFlag(ch.show_if))return;if(ch.once&&ch.next&&hasFlag('visited_'+ch.next))return;
       const btn=document.createElement('button');const locked=isChoiceLocked(ch);
@@ -2300,7 +2922,7 @@ function renderGame(root){
         if(ch.give_item){const l=document.createElement('span');l.className='item-label';l.textContent='+ '+ch.give_item;btn.appendChild(l);}
         if(ch.take_item){const l=document.createElement('span');l.className='item-label';l.textContent='- '+ch.take_item;btn.appendChild(l);}
         if(ch.advance_time){const l=document.createElement('span');l.className='time-label';l.textContent=`\u23f1 +${ch.advance_time}h`;btn.appendChild(l);}
-        if(ch.mod_reputation){const l=document.createElement('span');l.className='reputation-label';l.textContent=Object.entries(ch.mod_reputation).map(([id,d])=>`${id} ${d>0?'+'+d:d}`).join(', ');btn.appendChild(l);}
+        // reputation changes are silent — tracked in observations panel
         if(ch.set_quest_state){const l=document.createElement('span');l.className='quest-label';l.textContent=Object.entries(ch.set_quest_state).map(([id,s])=>`${id}\u2192${s}`).join(', ');btn.appendChild(l);}
         if(ch.spend_composure){const l=document.createElement('span');l.className='composure-label';l.textContent=`\u2212${ch.spend_composure} composure`;btn.appendChild(l);}
         btn.onclick=(ch.roll&&typeof ch.roll==='object')?()=>startRoll(ch):()=>applyChoice(ch);
@@ -2324,27 +2946,38 @@ function renderGame(root){
   }
   // Version watermark
   { const vm=document.createElement('div');vm.className='version-mark';vm.textContent='SPASIBO v1.2 — Zarya';root.appendChild(vm); }
-  if(G.panelOpen==='notes')    _renderNotesPanel(root);
-  if(G.panelOpen==='status')   _renderStatusPanel(root);
-  if(G.panelOpen==='breviary') _renderBreviaryPanel(root);
-  if(G.panelOpen==='glossary') _renderGlossaryPanel(root);
-  if(G.panelOpen==='map')      _renderMapPanelSide(root);
-  if(G.panelOpen==='journal')  renderJournalPanel(root,openPanel);
-  if(G.panelOpen==='log')      renderEventLogPanel(root,openPanel);
-  if(G.panelOpen==='codex')    renderCodexPanel(root,openPanel);
+  // Render panel only if not already open (openPanel renders synchronously)
+  if(G.panelOpen && !document.querySelector('.panel-overlay')) {
+    _renderPanel(G.panelOpen, root);
+  }
 }
 
 function _buildHeader(scene){
   const hdr=document.createElement('div');hdr.className='game-header';
+  // Anomaly deviation indicator in header
+  const _dev = G.magneticDeviation || 0;
+  if (_dev > 0.2) {
+    const devIndicator = document.createElement('div');
+    devIndicator.className = 'deviation-indicator';
+    const devDeg = Math.round(_dev * 41); // 0-41 degrees
+    const devText = _dev > 0.7 ? `${devDeg}° — past calibration` :
+                    _dev > 0.4 ? `${devDeg}° deviation` :
+                    `${devDeg}°`;
+    devIndicator.textContent = devText;
+    devIndicator.style.opacity = Math.min(1, _dev * 1.4).toFixed(2);
+    hdr.appendChild(devIndicator);
+  }
   const si=document.createElement('div');si.className='save-indicator';si.textContent='\u25e6 autosaved';si.style.display='none';hdr.appendChild(si);
   const moodCls=scene.mood==='uncanny'?' uncanny':scene.mood==='revelation'?' revelation':'';
   const lb=document.createElement('div');lb.className='location-bar'+moodCls;
+  const locSpan=document.createElement('span'); locSpan.textContent=scene.location||''; lb.appendChild(locSpan);
   const hourName = LITURGICAL_HOURS[G.liturgicalHour]?.name;
-  lb.textContent = hourName ? `${scene.location}  ·  ${hourName}` : scene.location;
+  if(hourName){ const hs=document.createElement('span'); hs.className='loc-hour'; hs.textContent=hourName; lb.appendChild(hs); }
   hdr.appendChild(lb);
   const sbarDoubt = G.stats.doubt || 0;
   const sb=document.createElement('div');sb.className='sbar'+(sbarDoubt>=7?' sbar-jitter':'');
-  Object.entries(G.stats).forEach(([k,v])=>{const d=document.createElement('div');d.className='stat';d.innerHTML=k+' <span class="stat-val">'+v+'</span>'+(_registries.statTips[k]?'<span class="stat-tip">'+_registries.statTips[k]+'</span>':'');sb.appendChild(d);});
+  const _statLabels={vigilance:'bearing',composure:'stillness',communion:'solidarity',doubt:'static'};
+  Object.entries(G.stats).forEach(([k,v])=>{const d=document.createElement('div');d.className='stat';const lbl=_statLabels[k]||k;d.innerHTML=lbl+' <span class="stat-val">'+v+'</span>'+(_registries.statTips[k]?'<span class="stat-tip">'+_registries.statTips[k]+'</span>':'');sb.appendChild(d);});
   if(G.theosis>32){const td=document.createElement('div');td.className='stat stat-theosis';const tier=G.theosis>65?'\u041a\u041a\u0410':String(G.theosis);td.innerHTML='<span class="stat-val" style="color:var(--gold)">'+tier+'</span><span class="stat-tip">theosis</span>';sb.appendChild(td);}
   // Deviation compass — shown when magneticDeviation > 0.2
   if(G.magneticDeviation>0.2){
@@ -2397,24 +3030,67 @@ function _appendBottomNav(root){
   bnav.style.cssText='position:fixed;bottom:0;left:0;width:100%;z-index:100;display:flex;justify-content:center;background:rgba(6,8,12,0.96);border-top:1px solid var(--border)';
   const codexCount=getUnlockedCodex().length;
   const doubt = G.stats.doubt || 0;
-  const flicker = doubt >= 7 ? 0.4 : doubt >= 5 ? 0.2 : 0;
+  const dev = G.magneticDeviation || 0;
+  // Flicker from doubt OR from extreme magnetic deviation (static/interference)
+  const flickerDoubt = doubt >= 7 ? 0.4 : doubt >= 5 ? 0.2 : 0;
+  const flickerDev   = dev >= 0.8 ? 0.5 : dev >= 0.65 ? 0.25 : 0;
+  const flicker = Math.max(flickerDoubt, flickerDev);
   const fl = (en, ru) => (flicker > 0 && Math.random() < flicker) ? ru : en;
   const navItems=[
-    {label:fl('observations','наблюдения'),fn:()=>openPanel('notes'),   title:'What has been noticed this crossing'},
-    {label:fl('status','статус'),          fn:()=>openPanel('status'),  title:'Stats, cover, charisms, inventory'},
+    {label:fl('record','запись'),          fn:()=>openPanel('notes'),     title:'Observations and codex'},
+    {label:fl('status','статус'),          fn:()=>openPanel('status'),    title:'Stats, cover, charisms, inventory'},
     {label:'breviary'+(G.soundings.available.length?' \u2691':''),fn:()=>openPanel('breviary'),cls:G.soundings.available.length?' has-available':'', title:'Soundings — moments of contemplation'},
-    {label:fl('codex','кодекс'),           fn:()=>openPanel('glossary'),title:'What has been learned about the ship'},
-    {label:fl('map','карта'),              fn:()=>openPanel('map'),     title:'Where things are'},
+    {label:fl('calendar','календарь'),     fn:()=>openPanel('calendar'),  title:'The crossing — day and liturgical hour'},
+    {label:fl('map','карта'),              fn:()=>openPanel('map'),       title:'Where things are'},
   ];
-  navItems.forEach(({label,fn,cls='',title=''})=>{
+  const _navPanelIds=['notes','status','breviary','calendar','map'];
+  navItems.forEach(({label,fn,cls='',title=''},_ni)=>{
     const b=document.createElement('button');
-    b.style.cssText="flex:1;background:none;border:none;border-right:1px solid var(--border);font-family:'GOST type B','Share Tech Mono','Courier Prime',monospace;font-size:.58rem;letter-spacing:.12em;text-transform:uppercase;padding:.65rem .2rem;cursor:pointer;color:var(--dim)";
-    b.className=cls;b.textContent=label;b.onclick=fn;if(title)b.title=title;bnav.appendChild(b);
+    b.style.cssText="flex:1;background:none;border:none;border-right:1px solid var(--border);font-family:'GOST type B','Share Tech Mono','Courier Prime',monospace;font-size:.58rem;letter-spacing:.12em;text-transform:uppercase;padding:.72rem .2rem .58rem;cursor:pointer;color:var(--dim);border-top:2px solid transparent;position:relative;";
+    const _pid=_navPanelIds[_ni]||'';
+    if(_pid)b.setAttribute('aria-controls','panel-'+_pid);
+    let _cls=cls||'';
+    if(G.panelOpen===_pid&&_pid) _cls+=(_cls?' ':'')+' panel-active';
+    b.className=_cls;b.textContent=label;b.onclick=fn;if(title)b.title=title;bnav.appendChild(b);
   });
-  root.appendChild(bnav);
+  // Persist nav in body — prevents double-fire from root.innerHTML='' clearing it
+  if (document.getElementById('bottom-nav')) {
+    document.getElementById('bottom-nav').querySelectorAll('button').forEach((b, i) => {
+      if (!navItems[i]) return;
+      const pid = _navPanelIds[i] || '';
+      let cls = navItems[i].cls || '';
+      if (G.panelOpen === pid && pid) cls = (cls + ' panel-active').trim();
+      b.className = cls;
+      b.textContent = navItems[i].label;
+    });
+  } else {
+    document.body.appendChild(bnav);
+  }
+  // Canvas toggle button (bottom-left)
+  const _atmBtn=document.createElement('button');_atmBtn.className='atmos-toggle';
+  _atmBtn.textContent=_atmosEnabled?'atmos on':'atmos off';
+  _atmBtn.onclick=toggleAtmos;_atmBtn.title='Toggle atmospheric animation (saves battery)';
+  _atmBtn.setAttribute('aria-label','Toggle atmospheric animation');
+  root.appendChild(_atmBtn);
+
+  // ? Help button
+  if(!document.querySelector('.help-btn')){
+    const _hBtn=document.createElement('button');_hBtn.className='help-btn';
+    _hBtn.textContent='?';_hBtn.setAttribute('aria-label','How to play');
+    _hBtn.onclick=()=>{ if(G._helpOpen){document.querySelector('.help-overlay')?.remove();G._helpOpen=false;}else{renderHelp(document.getElementById('root'));} };
+    document.body.appendChild(_hBtn);
+  }
+
+  // Restore high contrast pref
+  if(localStorage.getItem('spasibo_hc')==='1') document.body.classList.add('high-contrast');
+
+  // Low power mode on mobile
+  if(!_atmosEnabled||(/Mobi|Android/i.test(navigator.userAgent)&&!localStorage.getItem('spasibo_atmos'))){
+    _canvas.style.display='none';_atmosEnabled=false;
+  }
 }
 function _renderNotesPanel(root) {
-  const overlay = document.createElement('div'); overlay.className = 'panel-overlay';
+  const overlay = document.createElement('div'); overlay.className = 'panel-overlay'; overlay.setAttribute('role','dialog'); overlay.setAttribute('aria-modal','true');
   overlay.onclick = (e) => { if (e.target === overlay) openPanel(null); };
   const panel = document.createElement('div'); panel.className = 'panel';
 
@@ -2493,11 +3169,11 @@ function _renderNotesPanel(root) {
     empty.textContent = 'Nothing noted yet.'; body.appendChild(empty);
   }
 
-  panel.appendChild(body); overlay.appendChild(panel); root.appendChild(overlay);
+  panel.appendChild(body); overlay.appendChild(panel); document.body.appendChild(overlay);
 }
 
 function _renderStatusPanel(root) {
-  const overlay = document.createElement('div'); overlay.className = 'panel-overlay';
+  const overlay = document.createElement('div'); overlay.className = 'panel-overlay'; overlay.setAttribute('role','dialog'); overlay.setAttribute('aria-modal','true');
   overlay.onclick = (e) => { if (e.target === overlay) openPanel(null); };
   const panel = document.createElement('div'); panel.className = 'panel';
 
@@ -2567,22 +3243,50 @@ function _renderStatusPanel(root) {
     });
   }
 
-  // Companions
+  // Companions — show with trust level and last memory
   if (G.companions && G.companions.length > 0) {
     const cs = document.createElement('div'); cs.className = 'panel-section'; cs.textContent = 'companions'; body.appendChild(cs);
     G.companions.forEach(c => {
-      const row = document.createElement('div'); row.className = 'panel-row';
-      row.textContent = c.name || c.id; body.appendChild(row);
+      const wrap = document.createElement('div'); wrap.className = 'companion-row';
+      const nameEl = document.createElement('div'); nameEl.className = 'companion-name';
+      nameEl.textContent = c.name || c.id;
+      // Trust indicator from npcStance
+      const stance = G.npcStance && G.npcStance[c.id];
+      const trust = stance ? (stance.trust || 0) : (c.stats && c.stats.trust ? c.stats.trust : 0);
+      if (trust > 0) {
+        const trustEl = document.createElement('span'); trustEl.className = 'companion-trust';
+        trustEl.textContent = '  ' + '·'.repeat(Math.min(trust, 5));
+        nameEl.appendChild(trustEl);
+      }
+      wrap.appendChild(nameEl);
+      // Last memory
+      if (stance && stance.memories && stance.memories.length) {
+        const lastMem = stance.memories[stance.memories.length - 1];
+        const memEl = document.createElement('div'); memEl.className = 'companion-memory';
+        memEl.textContent = lastMem.text || '';
+        wrap.appendChild(memEl);
+      }
+      body.appendChild(wrap);
     });
   }
 
-  // Inventory
+  // Inventory — tappable, shows description
   if (G.inventory && G.inventory.length > 0) {
     const cs = document.createElement('div'); cs.className = 'panel-section'; cs.textContent = 'carried'; body.appendChild(cs);
     G.inventory.forEach(id => {
       const item = _registries.items[id];
-      const row = document.createElement('div'); row.className = 'panel-row';
-      row.textContent = item ? (item.name || id) : id; body.appendChild(row);
+      const wrap = document.createElement('div'); wrap.className = 'item-row'; wrap.style.cursor = 'pointer';
+      const name = document.createElement('div'); name.className = 'item-name';
+      name.textContent = item ? (item.name || id) : id;
+      const bonus = item && item.effectWhileHeld ? Object.entries(item.effectWhileHeld).map(([k,v])=>`${k} ${v>0?'+'+v:v}`).join('  ') : '';
+      if (bonus) { const b = document.createElement('span'); b.className = 'item-bonus'; b.textContent = bonus; name.appendChild(b); }
+      wrap.appendChild(name);
+      const desc = document.createElement('div'); desc.className = 'item-desc';
+      desc.style.cssText = 'display:none;font-size:.8rem;color:var(--dim);line-height:1.72;margin-top:.3rem;font-style:italic;padding-left:.8rem;border-left:1px solid var(--border);';
+      desc.textContent = item ? (item.desc || '') : '';
+      wrap.appendChild(desc);
+      wrap.onclick = () => { desc.style.display = desc.style.display === 'none' ? 'block' : 'none'; };
+      body.appendChild(wrap);
     });
   }
 
@@ -2595,11 +3299,37 @@ function _renderStatusPanel(root) {
     row.appendChild(l); row.appendChild(v); body.appendChild(row);
   });
 
-  panel.appendChild(body); overlay.appendChild(panel); root.appendChild(overlay);
+
+  // ── CODEX section merged below observations ──────────────────
+  const _unlocked = typeof getUnlockedCodex === 'function' ? getUnlockedCodex() : [];
+  const _hasGlossary = _registries.glossary && _registries.glossary.length > 0;
+  if (_unlocked.length || _hasGlossary) {
+    const _cdxSep = document.createElement('div'); _cdxSep.style.cssText='height:1px;background:var(--border);margin:1.4rem 0 1rem;'; body.appendChild(_cdxSep);
+    const _cdxSec = document.createElement('div'); _cdxSec.className='panel-section'; _cdxSec.textContent='codex'; body.appendChild(_cdxSec);
+    const _re = (titleTxt, bodyTxt, catTxt) => {
+      const item=document.createElement('div'); item.className='codex-entry'; item.style.marginBottom='.9rem'; item.style.cursor='pointer';
+      if(catTxt){const c=document.createElement('div');c.className='codex-category';c.textContent=catTxt;item.appendChild(c);}
+      const t=document.createElement('div');t.className='codex-term';t.textContent=titleTxt;
+      const d=document.createElement('div');d.className='codex-body';
+      d.style.cssText='max-height:3.6rem;overflow:hidden;transition:max-height .2s;-webkit-mask-image:linear-gradient(to bottom,black 50%,transparent);mask-image:linear-gradient(to bottom,black 50%,transparent);';
+      d.textContent=bodyTxt; item.appendChild(t); item.appendChild(d);
+      item.onclick=()=>{
+        const ex=d.style.maxHeight==='none';
+        d.style.maxHeight=ex?'3.6rem':'none';
+        d.style.webkitMaskImage=ex?'linear-gradient(to bottom,black 50%,transparent)':'none';
+        d.style.maskImage=ex?'linear-gradient(to bottom,black 50%,transparent)':'none';
+      };
+      body.appendChild(item);
+    };
+    if(_unlocked.length) _unlocked.forEach(id=>{const e=typeof getCodexEntry==='function'?getCodexEntry(id):null;if(e)_re(e.title,e.content,e.category||'');});
+    if(_hasGlossary) _registries.glossary.forEach(({term,def})=>_re(term,def,''));
+  }
+
+  panel.appendChild(body); overlay.appendChild(panel); document.body.appendChild(overlay);
 }
 
 function _renderBreviaryPanel(root) {
-  const overlay = document.createElement('div'); overlay.className = 'panel-overlay';
+  const overlay = document.createElement('div'); overlay.className = 'panel-overlay'; overlay.setAttribute('role','dialog'); overlay.setAttribute('aria-modal','true');
   overlay.onclick = (e) => { if (e.target === overlay) openPanel(null); };
   const panel = document.createElement('div'); panel.className = 'panel';
 
@@ -2662,11 +3392,11 @@ function _renderBreviaryPanel(root) {
     });
   }
 
-  panel.appendChild(body); overlay.appendChild(panel); root.appendChild(overlay);
+  panel.appendChild(body); overlay.appendChild(panel); document.body.appendChild(overlay);
 }
 
 function _renderGlossaryPanel(root) {
-  const overlay = document.createElement('div'); overlay.className = 'panel-overlay';
+  const overlay = document.createElement('div'); overlay.className = 'panel-overlay'; overlay.setAttribute('role','dialog'); overlay.setAttribute('aria-modal','true');
   overlay.onclick = (e) => { if (e.target === overlay) openPanel(null); };
   const panel = document.createElement('div'); panel.className = 'panel';
 
@@ -2706,11 +3436,60 @@ function _renderGlossaryPanel(root) {
     });
   }
 
-  panel.appendChild(body); overlay.appendChild(panel); root.appendChild(overlay);
+  panel.appendChild(body); overlay.appendChild(panel); document.body.appendChild(overlay);
+}
+
+
+function _renderCalendarPanel(root) {
+  const overlay = document.createElement('div'); overlay.className = 'panel-overlay'; overlay.setAttribute('role','dialog'); overlay.setAttribute('aria-modal','true');
+  overlay.onclick = (e) => { if (e.target === overlay) openPanel(null); };
+  const panel = document.createElement('div'); panel.className = 'panel';
+
+  const hdr = document.createElement('div'); hdr.className = 'panel-header';
+  const t = document.createElement('div'); t.className = 'panel-title'; t.textContent = 'the crossing';
+  const x = document.createElement('button'); x.className = 'panel-close'; x.textContent = '✕'; x.onclick = () => openPanel(null);
+  hdr.appendChild(t); hdr.appendChild(x); panel.appendChild(hdr);
+
+  const body = document.createElement('div'); body.className = 'panel-body';
+  
+  // Day indicator
+  const dayS = document.createElement('div'); dayS.className = 'panel-section'; dayS.textContent = `day ${G.time.day} of ${G.time.maxDays}`; body.appendChild(dayS);
+
+  // Hours
+  const hourDescs = [
+    { name:'Lauds',    mood:'dawn',          desc:'The first light. The instruments are quieter. NPCs are honest in the way people are honest when they are not fully awake yet.' },
+    { name:'Prime',    mood:'early morning', desc:'The ship at work. Maintenance, measurements, small talk. The day is still forming.' },
+    { name:'Terce',    mood:'mid-morning',   desc:'The anomaly tends to be stable here. Good time for the chart room and the hold.' },
+    { name:'Sext',     mood:'noon',          desc:'Tension rises with the light. Cover challenges are more likely. Othis is most alert.' },
+    { name:'None',     mood:'afternoon',     desc:'The strange hour. The anomaly sometimes spikes. Oblong is most present. NPCs are tired and less guarded.' },
+    { name:'Vespers',  mood:'evening',       desc:'Candour. The time of hardest conversations. Miguel tends to speak. Lena brings food no one asked for.' },
+    { name:'Compline', mood:'night',         desc:'The anomaly intensifies. The night office. Alexei cannot sleep. This is when the radio reaches furthest.' },
+  ];
+
+  hourDescs.forEach((h, i) => {
+    const isCurrent = i === G.liturgicalHour;
+    const row = document.createElement('div'); 
+    row.className = 'calendar-hour' + (isCurrent ? ' current' : '');
+    const nameLine = document.createElement('div'); nameLine.className = 'calendar-hour-name';
+    nameLine.textContent = h.name + (isCurrent ? ' ◂' : '') + '  ·  ' + h.mood;
+    const desc = document.createElement('div'); desc.className = 'calendar-hour-desc';
+    desc.textContent = h.desc;
+    row.appendChild(nameLine); row.appendChild(desc); body.appendChild(row);
+  });
+
+  // Theosis tier indicator
+  const tier = G.theosis <= 32 ? 'The Dawn — Asleep' : G.theosis <= 65 ? 'Zarya — Waking' : 'Заря — Illumined';
+  const tS = document.createElement('div'); tS.className = 'panel-section'; tS.style.marginTop='1rem'; tS.textContent = 'state'; body.appendChild(tS);
+  const tRow = document.createElement('div'); tRow.className = 'calendar-hour';
+  const tLine = document.createElement('div'); tLine.className = 'calendar-hour-name'; tLine.textContent = tier;
+  if (G.theosis > 32) tLine.style.color = G.theosis > 65 ? 'var(--gold)' : 'var(--amber)';
+  tRow.appendChild(tLine); body.appendChild(tRow);
+
+  panel.appendChild(body); overlay.appendChild(panel); document.body.appendChild(overlay);
 }
 
 function _renderMapPanelSide(root) {
-  const overlay = document.createElement('div'); overlay.className = 'panel-overlay';
+  const overlay = document.createElement('div'); overlay.className = 'panel-overlay'; overlay.setAttribute('role','dialog'); overlay.setAttribute('aria-modal','true');
   overlay.onclick = (e) => { if (e.target === overlay) openPanel(null); };
   const panel = document.createElement('div'); panel.className = 'panel';
 
@@ -2734,38 +3513,328 @@ function _renderMapPanelSide(root) {
     instrument_room_first:'instrument_room',instrument_shimmer:'instrument_room',alexei_cabinet:'instrument_room',
     main_deck_hub:'main_deck',act_two_begin:'main_deck',
   };
-  const sceneMap = {cabin:'cabin_wake',main_deck:'main_deck_hub',foredeck:'foredeck_first',bridge:'bridge_hub',mess:'mess_hub',galley:'galley_hub',chart_room:'chart_room_first',captain_quarters:'bridge_hub',hold_access:'hold_first',hold:'hold_first',cargo_bay:'hold_first',instrument_room:'instrument_room_first',aft:'instrument_room_first'};
+  // sceneMap: map node → scene to navigate to from map
+  // First-visit scenes (foredeck_first, chart_room_first etc.) are only used on first visit.
+  // After that, use the return/hub scene — detected by whether visited flag is set.
+  const _baseSceneMap = {cabin:'cabin_wake',main_deck:'main_deck_hub',foredeck:'foredeck_first',bridge:'bridge_hub',mess:'mess_hub',galley:'galley_hub',chart_room:'chart_room_first',captain_quarters:'bridge_hub',hold_access:'hold_first',hold:'hold_first',cargo_bay:'hold_first',instrument_room:'instrument_room_first',aft:'instrument_room_first'};
+  const _returnSceneMap = {cabin:'cabin_porthole_stay',foredeck:'foredeck_standing',chart_room:'chart_room_first',hold_access:'hold_first',hold:'hold_boxes',instrument_room:'instrument_shimmer'};
+  // isVisited must be declared BEFORE sceneMap uses it
+  const _checkVisited = (nodeId, sm) => {
+    if(G.flags && G.flags.has('visited_'+nodeId)) return true;
+    const scId = sm[nodeId];
+    if(scId && G.flags && G.flags.has('visited_'+scId)) return true;
+    for(const [nid, sid] of Object.entries(sm)) {
+      if(nid === nodeId && G.flags && G.flags.has('visited_'+sid)) return true;
+    }
+    return false;
+  };
+  // Build sceneMap using the base maps first (no isVisited needed yet)
+  const sceneMap = {..._baseSceneMap};
+  // Now apply return-scene overrides where already visited
+  for(const [nodeId, firstScene] of Object.entries(_baseSceneMap)){
+    const returnScene = _returnSceneMap[nodeId];
+    if(returnScene && _checkVisited(nodeId, _baseSceneMap)) sceneMap[nodeId] = returnScene;
+  }
+  // isVisited function for use in categorisation loop
+  const isVisited = (nodeId) => _checkVisited(nodeId, sceneMap);
   const currentNode = sceneToNode[G.scene] || null;
 
   if (!nodes || Object.keys(nodes).length === 0) {
     const empty = document.createElement('p'); empty.style.cssText = 'color:var(--dim);font-style:italic;font-size:.84rem;';
     empty.textContent = 'The ship is still taking shape.'; body.appendChild(empty);
   } else {
-    const list = document.createElement('div'); list.className = 'map-grid';
     const nodeNames = { cabin:'Cabin',main_deck:'Main Deck',foredeck:'Foredeck',bridge:'Bridge',mess:'Mess Hall',galley:'Galley',chart_room:'Chart Room',captain_quarters:"Captain's Quarters",hold_access:'Hold Access',hold:'Hold',cargo_bay:'Cargo Bay',instrument_room:'Instrument Room',aft:'Aft Compartment' };
-    Object.entries(nodes).forEach(([id, node]) => {
-      const required = node.theosisRequired !== undefined ? node.theosisRequired : 0;
-      if (G.theosis < required) return;
-      const isCurrent = currentNode === id;
-      const wasVisited = G.flags && G.flags.has('visited_' + (sceneMap[id] || id));
-      const row = document.createElement('div');
-      row.className = 'map-node' + (isCurrent ? ' current' : wasVisited ? ' visited' : '');
-      const dot = document.createElement('div'); dot.className = 'map-node-dot';
-      const label = document.createElement('span'); label.textContent = nodeNames[id] || id.replace(/_/g,' ');
-      row.appendChild(dot); row.appendChild(label);
-      row.onclick = () => { if (!isCurrent) { openPanel(null); navigate(sceneMap[id] || id); } };
-      list.appendChild(row);
+    
+    // Map shows only what you have been to or remember
+    // Accessible-but-unvisited locations are NOT shown (discover by exploring)
+    const visited=[], knownRoute=[], hiddenCount=[0];
+    Object.entries(nodes).forEach(([id,node])=>{
+      const req=node.theosisRequired||0;
+      if(G.theosis<req){hiddenCount[0]++;return;}
+      const isCur=currentNode===id;
+      const wasVisited = isVisited(id);
+      const scId = sceneMap[id];
+      const isPastLife=G.charisms&&G.charisms.includes('witness')&&G.pastLifeFlags&&(G.pastLifeFlags.has('visited_'+id)||(scId&&G.pastLifeFlags.has('visited_'+scId)));
+      if(isCur||wasVisited) visited.push({id,isCur,wasVisited});
+      else if(isPastLife) knownRoute.push(id);
+      // If not visited and not past-life: don't show — explore to discover
     });
-    body.appendChild(list);
-    const hidden = Object.values(nodes).filter(n => G.theosis < (n.theosisRequired || 0)).length;
-    if (hidden > 0) { const hint = document.createElement('p'); hint.className = 'map-hint'; hint.textContent = `${hidden} location${hidden>1?'s':''} not yet visible.`; body.appendChild(hint); }
+
+    const _hubNodes=new Set(['cabin','main_deck','bridge','mess','galley']);
+    const makeNode=(id,cls,isCur)=>{
+      const hubCls=_hubNodes.has(id)?' hub-node':'';
+      const row=document.createElement('div');row.className='map-node'+hubCls+cls+(isCur?' current':'');
+      const dot=document.createElement('div');dot.className='map-node-dot';
+      const label=document.createElement('span');label.textContent=nodeNames[id]||id.replace(/_/g,' ');
+      row.appendChild(dot);row.appendChild(label);
+      if(isCur)row.classList.add('current');
+      row.onclick=()=>{if(!isCur){openPanel(null);navigate(sceneMap[id]||id);}};
+      return row;
+    };
+
+    if(visited.length){
+      const sec=document.createElement('div');sec.className='panel-section';sec.textContent='this crossing';body.appendChild(sec);
+      const list=document.createElement('div');list.className='map-grid';
+      visited.forEach(({id,isCur,wasVisited})=>list.appendChild(makeNode(id,wasVisited&&!isCur?' visited':'',isCur)));
+      body.appendChild(list);
+    }
+    if(knownRoute.length){
+      const sec=document.createElement('div');sec.className='panel-section';sec.style.marginTop='.9rem';sec.textContent='remembered from before';body.appendChild(sec);
+      const list=document.createElement('div');list.className='map-grid';
+      knownRoute.forEach(id=>{
+        const row=makeNode(id,' past-life',false);
+        row.title='Known from a previous crossing';list.appendChild(row);
+      });
+      body.appendChild(list);
+    }
+    const hc=hiddenCount[0];
+    if(hc>0){
+      const hint=document.createElement('p');hint.className='map-hint';hint.textContent=`${hc} location${hc>1?'s':''} not yet accessible.`;body.appendChild(hint);
+    }
   }
 
-  panel.appendChild(body); overlay.appendChild(panel); root.appendChild(overlay);
+  panel.appendChild(body); overlay.appendChild(panel); document.body.appendChild(overlay);
 }
 
 loadMetaUnlocks();
-initBuiltinSfx();
+initBuiltinSfx(); _initKeyboard();
+
+function renderCrossingRecord(root) {
+  // Called before __new_play__ — shows a dénouement screen
+  const screen = document.createElement('div');
+  screen.className = 'crossing-record';
+
+  // Ending title
+  const endingNames = {
+    ending_erasure_reached:     ['ERASURE',     'The archive is gone.'],
+    ending_witness_reached:     ['WITNESS',     'The archive is hidden.'],
+    ending_restoration_reached: ['RESTORATION', 'The record goes into the world.'],
+    ending_solidarity_reached:  ['SOLIDARITY',  'The ship acted as one body.'],
+    ending_the_knowing_reached: ['THE KNOWING', 'You have been here before.'],
+  };
+  let endingTitle = 'THE CROSSING', endingDesc = '';
+  for (const [flag, [title, desc]] of Object.entries(endingNames)) {
+    if (G.flags.has(flag)) { endingTitle = title; endingDesc = desc; break; }
+  }
+
+  const titleEl = document.createElement('div');
+  titleEl.className = 'cr-ending-title';
+  titleEl.textContent = endingTitle;
+  screen.appendChild(titleEl);
+
+  if (endingDesc) {
+    const descEl = document.createElement('div');
+    descEl.className = 'cr-ending-desc';
+    descEl.textContent = endingDesc;
+    screen.appendChild(descEl);
+  }
+
+  // Divider
+  const div1 = document.createElement('div'); div1.className = 'cr-divider'; screen.appendChild(div1);
+
+  // Settled soundings
+  if (G.soundings.settled && G.soundings.settled.length > 0) {
+    const sec = document.createElement('div'); sec.className = 'cr-section'; sec.textContent = 'Settled this crossing'; screen.appendChild(sec);
+    for (const s of G.soundings.settled) {
+      const snd = _registries.soundings[s.id];
+      const row = document.createElement('div'); row.className = 'cr-row';
+      row.textContent = (snd && snd.name) ? snd.name : s.id;
+      screen.appendChild(row);
+    }
+  }
+
+  // NPC memories — surface 2–3 most significant
+  if (G.npcStance) {
+    const memories = [];
+    for (const [npc, stance] of Object.entries(G.npcStance)) {
+      if (stance.memories && stance.memories.length) {
+        // Take the last (most recent) memory per NPC
+        const m = stance.memories[stance.memories.length - 1];
+        if (m && m.text) memories.push({ npc, text: m.text });
+      }
+    }
+    if (memories.length > 0) {
+      const div2 = document.createElement('div'); div2.className = 'cr-divider'; screen.appendChild(div2);
+      const sec2 = document.createElement('div'); sec2.className = 'cr-section'; sec2.textContent = 'What the ship remembers'; screen.appendChild(sec2);
+      for (const { npc, text } of memories.slice(0, 3)) {
+        const row = document.createElement('div'); row.className = 'cr-memory';
+        const npcSpan = document.createElement('span'); npcSpan.className = 'cr-memory-npc';
+        npcSpan.textContent = npc.charAt(0).toUpperCase() + npc.slice(1);
+        const textSpan = document.createElement('span'); textSpan.textContent = ' — ' + text;
+        row.appendChild(npcSpan); row.appendChild(textSpan);
+        screen.appendChild(row);
+      }
+    }
+  }
+
+  // Theosis and crossing tax
+  const div3 = document.createElement('div'); div3.className = 'cr-divider'; screen.appendChild(div3);
+  const t = G.theosis || 0;
+  const tax = Math.min(15, Math.max(0, t - 5));
+  const carried = Math.max(5, Math.min(85, t - tax));
+  const tierNames = ['Asleep', 'Waking', 'Illumined'];
+  const tierName = t >= 66 ? tierNames[2] : t >= 33 ? tierNames[1] : tierNames[0];
+  const theoSec = document.createElement('div'); theoSec.className = 'cr-section'; theoSec.textContent = 'Theosis'; screen.appendChild(theoSec);
+  const theoRow = document.createElement('div'); theoRow.className = 'cr-theosis';
+  theoRow.innerHTML = `<span class="cr-theosis-val">${t}</span> <span class="cr-theosis-tier">${tierName}</span>`;
+  screen.appendChild(theoRow);
+  const taxRow = document.createElement('div'); taxRow.className = 'cr-tax';
+  taxRow.textContent = `The body forgets ${tax}. You carry ${carried} into the next crossing.`;
+  screen.appendChild(taxRow);
+
+  // ── Ship's log — what the ship witnessed ──────────────────────
+  const _shipLog = [];
+  if (G.flags.has('ending_solidarity_reached') || G.flags.has('ending_restoration_reached')) {
+    _shipLog.push('In the hold throughout: one calico cat. She did not intervene. She witnessed.');
+  }
+  // Pavel in the ship's log if companion
+  if (G.flags.has('pavel_is_companion') && G.flags.has('pavel_anomaly_theology_seen')) {
+    _shipLog.push('On the foredeck at peak: Pavel Ivanovich, who had been in prison for saying things people did not want heard, and who came to the bow of a non-magnetic ship and stood there until the field answered.');
+  } else if (G.flags.has('pavel_is_companion')) {
+    _shipLog.push('On the foredeck throughout: Pavel Ivanovich. He held the rope. He stood at the bow. He said things that turned out to be true.');
+  }
+  if (G.flags.has('sunday_service_led')) {
+    _shipLog.push('In the mess hall on Sunday: seven people who did not have to stay, stayed.');
+  }
+  if (G.flags.has('archive_transmitted')) {
+    _shipLog.push('On the instrument room radio: a transmission at 4am, at peak anomaly, into the frequencies that use deviation as a carrier. Something received it.');
+  }
+  if (G.flags.has('anomaly_signal_returned')) {
+    _shipLog.push('At 4:18am: the field returned the signal. The instruments confirmed this. Alexei marked the timestamp.');
+  }
+  if (G.flags.has('ending_erasure_reached')) {
+    _shipLog.push('In the hold at 2am: smoke. The sea absorbed it. The anomaly is still measurable at this position.');
+  }
+  if (_shipLog.length) {
+    const div5 = document.createElement('div'); div5.className = 'cr-divider'; screen.appendChild(div5);
+    const logSec = document.createElement('div'); logSec.className = 'cr-section'; logSec.textContent = "The ship's log"; screen.appendChild(logSec);
+    _shipLog.forEach(line => {
+      const row = document.createElement('div'); row.className = 'cr-memory cr-ship-log';
+      row.textContent = line; screen.appendChild(row);
+    });
+  }
+
+  // Meta marks — which endings reached
+  const metaEndings = ['reached_erasure','reached_witness','reached_restoration','reached_solidarity','reached_the_knowing'];
+  const metaLabels = { reached_erasure:'✦', reached_witness:'✦✦', reached_restoration:'✦✦✦', reached_solidarity:'✦✦✦✦', reached_the_knowing:'✦✦✦✦✦' };
+  const reached = metaEndings.filter(m => hasMeta(m));
+  if (reached.length > 0) {
+    const metaEl = document.createElement('div'); metaEl.className = 'cr-meta';
+    metaEl.textContent = reached.map(m => metaLabels[m]).join('  ');
+    screen.appendChild(metaEl);
+  }
+
+  // Continue button
+  const div4 = document.createElement('div'); div4.className = 'cr-divider'; screen.appendChild(div4);
+  const btn = document.createElement('button');
+  btn.className = 'btn cr-btn';
+  btn.textContent = G.playCount > 0 ? 'Begin a new crossing.' : 'Begin.';
+  btn.onclick = () => newPlay();
+  screen.appendChild(btn);
+
+  root.appendChild(screen);
+}
+
+// ─────────────────────────────────────────────────────────────────
+// COMPANION HELPERS
+// ─────────────────────────────────────────────────────────────────
+
+// Get a random ambient companion line for the current location/trust.
+// Returns null if companion not present or no lines registered for context.
+function getCompanionLine(companionId, location, trustMin) {
+  if (!hasCompanion(companionId)) return null;
+  const trust = (G.npcStance[companionId] && G.npcStance[companionId].trust) || 0;
+  if (trustMin !== undefined && trust < trustMin) return null;
+  const pool = (_registries.companionLines[companionId] || []).filter(entry => {
+    if (entry.location && entry.location !== location) return false;
+    if (entry.trustMin !== undefined && trust < entry.trustMin) return false;
+    if (entry.trustMax !== undefined && trust > entry.trustMax) return false;
+    if (entry.condition && !evaluateCondition(entry.condition)) return false;
+    if (entry.once && G.flags.has('_cl_shown_' + entry.id)) return false;
+    return true;
+  });
+  if (!pool.length) return null;
+  const entry = pool[Math.floor(Math.random() * pool.length)];
+  if (entry.once) G.flags.add('_cl_shown_' + entry.id);
+  return entry.text;
+}
+
+// Register a companion ambient line.
+function registerCompanionLine(companionId, entry) {
+  if (!_registries.companionLines) _registries.companionLines = {};
+  if (!_registries.companionLines[companionId]) _registries.companionLines[companionId] = [];
+  _registries.companionLines[companionId].push(entry);
+}
+
+// Inject a companion interjection beat into an active dialogue.
+// Call from a scene's onEnter to splice a beat after beatIndex N.
+function injectDialogueBeat(afterIndex, beat) {
+  if (!G._dialogue) return;
+  const beats = G._dialogue.beats;
+  const insertAt = Math.min(afterIndex + 1, beats.length);
+  beats.splice(insertAt, 0, beat);
+}
+
+
+function renderHelp(root) {
+  const ov = document.createElement('div'); ov.className = 'help-overlay';
+  ov.setAttribute('role','dialog'); ov.setAttribute('aria-label','How to play');
+
+  const close = document.createElement('button'); close.className = 'help-close';
+  close.textContent = '×'; close.setAttribute('aria-label','Close help');
+  close.onclick = () => { ov.remove(); G._helpOpen = false; };
+  ov.appendChild(close);
+
+  const content = `
+<h2>The Crossing</h2>
+<p>You are the ship's chaplain. This is your cover. Your mission is in the case under the bunk.</p>
+<p>The crossing takes three days. What happens in those three days determines which ending you reach — and what you carry into the next crossing.</p>
+
+<h2>Stats</h2>
+<ul>
+<li><strong>Vigilance</strong> — what you notice. High vigilance reveals things before they become problems.</li>
+<li><strong>Composure</strong> — what you can hold under pressure. Used in cover challenges.</li>
+<li><strong>Communion</strong> — how much the crew trusts you collectively. Opens paths.</li>
+<li><strong>Doubt</strong> — accumulates when the cover is strained. High doubt dissolves things.</li>
+</ul>
+
+<h2>Cover Challenges</h2>
+<p>When someone questions your cover, a challenge overlay appears. You roll 2d6 + Composure against the field difficulty.</p>
+<p><strong>Success</strong>: the cover holds cleanly. <strong>Partial</strong>: holds, but costs something. <strong>Failure</strong>: the cover shifts. Cover integrity (◈) tracks how much remains.</p>
+<p>Tap <em>skip — resolve automatically</em> if you prefer narrative play.</p>
+
+<h2>Soundings</h2>
+<p>Soundings are moments of spiritual recognition. Open the Breviary to see available soundings. Take one when it resonates. They progress through contemplative choices — stillness, presence, witness. When a sounding settles, the porthole changes.</p>
+
+<h2>Theosis</h2>
+<p>Theosis is spiritual progression. It rises through contemplation, honest choices, and witness. It changes what's available. Watch the porthole for the tier you're in: Asleep, Waking, Illumined.</p>
+
+<h2>Items</h2>
+<p>Items in your inventory (STATUS panel) can be tapped to read their description. Some modify stats while held.</p>
+
+<h2>Keyboard Shortcuts</h2>
+<ul>
+<li><span class="help-key">1</span>–<span class="help-key">9</span> Activate choices</li>
+<li><span class="help-key">Esc</span> Close panels</li>
+<li><span class="help-key">Tab</span> Navigate elements</li>
+<li><span class="help-key">Enter</span> Activate focused choice</li>
+</ul>
+`;
+  ov.innerHTML += content;
+
+  // High contrast toggle
+  const hcBtn = document.createElement('button'); hcBtn.className = 'contrast-toggle';
+  hcBtn.textContent = document.body.classList.contains('high-contrast') ? 'standard contrast' : 'high contrast';
+  hcBtn.onclick = () => {
+    document.body.classList.toggle('high-contrast');
+    localStorage.setItem('spasibo_hc', document.body.classList.contains('high-contrast') ? '1' : '0');
+    hcBtn.textContent = document.body.classList.contains('high-contrast') ? 'standard contrast' : 'high contrast';
+  };
+  ov.appendChild(hcBtn);
+
+  root.appendChild(ov);
+  G._helpOpen = true;
+}
 
 window.SOBORNOST={
   VERSION, G, render, setDebug, undo, redo,
@@ -2780,15 +3849,16 @@ window.SOBORNOST={
   registerCodexEntry, unlockCodexEntry, isCodexUnlocked, checkCodexUnlocks,
   registerAmbientEvent, unregisterAmbientEvent,
   registerCharisms, registerSounding, registerNote, registerArt, registerGlossaryEntry,
-  registerStatTip, registerRollModifier, setAvailableModes,
+  registerStatTip, registerRollModifier, setAvailableModes, setModeDescriptions, getModeDescription,
   setIconWordFunction, setHarbourWordFunction, setShipWordFunction, setObjectDescriptionFunction,
   registerScenePool, addToScenePool, registerRitual, registerTranslation,
   registerPostEventShift, registerPastLifeLine, registerMapNode, registerSfx,
   registerItem, registerAtmosModifier, setTutorialContent,
   registerTheosisTagValue, setTheosisTiers, incrementTheosis, flashTheosisLight,
-  setMagneticDeviation, getMagneticDeviation,
+  setMagneticDeviation, getMagneticDeviation, progressSounding, getShipState, modShipState,
   registerNameMapping, setLiturgicalHour,
   addCompanion, removeCompanion, hasCompanion, getCompanion, modCompanionStat, setCompanionCharism,
+  getCompanionLine, registerCompanionLine, injectDialogueBeat,
   learn, comeToBelieve, contradict, knows, believes,
   pushConsequence, scheduleEvent,
   unlockMeta, hasMeta, exportAnalytics,
