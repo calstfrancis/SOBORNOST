@@ -1,6 +1,6 @@
 # SOBORNOST
 
-A browser-based interactive fiction engine for serious narrative games. No build step. No dependencies. Runs natively in any modern browser via ES6 modules, deploys directly to GitHub Pages.
+A browser-based interactive fiction engine for serious narrative games. No build step. No dependencies. Runs natively in any modern browser, deploys directly to GitHub Pages.
 
 Built for games that involve spiritual practice, slow disclosure, contested identity, and meaning that accumulates across multiple playthroughs.
 
@@ -8,9 +8,9 @@ Built for games that involve spiritual practice, slow disclosure, contested iden
 
 ## Overview
 
-SOBORNOST is a complete game engine written as a single vanilla JavaScript file. The author registers scenes, charisms, soundings, and endings in a plain JavaScript data file. The engine handles rendering, audio, atmospherics, save/load, undo/redo, and all game mechanics. There is no compilation step and no package manager required.
+SOBORNOST is a complete game engine written as a single vanilla JavaScript file. The author registers scenes, charisms, soundings, and endings in a plain JavaScript data file. The engine handles rendering, audio, atmospherics, save/load, companion systems, cover mechanics, and all game mechanics. There is no compilation step and no package manager required.
 
-The name is the Russian theological term for conciliarity — the unity of many voices into one body. The engine was built to support a specific kind of contemplative, layered narrative game, but its systems are general enough for any text-heavy interactive fiction with RPG mechanics.
+The name is the Russian theological term for conciliarity — the unity of many voices into one body.
 
 ---
 
@@ -21,11 +21,7 @@ The name is the Russian theological term for conciliarity — the unity of many 
 JavaScript modules cannot load from `file://` URLs. You need a local HTTP server:
 
 ```bash
-# Python (always available)
 python3 -m http.server 3000
-
-# Or use the built-in dev server (hot-reload included)
-node tools/dev-server.js 3000
 ```
 
 Open `http://localhost:3000`.
@@ -34,41 +30,43 @@ Open `http://localhost:3000`.
 
 ```
 your-game/
-  index.html          ← your shell HTML
-  sobornost.js        ← the complete engine (do not edit)
-  game/
-    data.js           ← your scenes, charisms, endings
+  index.html        ← shell HTML
+  sobornost.js      ← the complete engine (do not edit)
+  game.js           ← your scenes, charisms, endings
+  style.css         ← your stylesheet
 ```
 
 ### HTML setup
 
 ```html
 <!DOCTYPE html>
-<html>
+<html lang="en">
 <head>
   <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Your Game</title>
   <link rel="stylesheet" href="style.css">
+  <script>
+    window.GAME_TITLE    = 'YOUR GAME';
+    window.GAME_SUBTITLE = 'a subtitle';
+    window.GAME_MOTTO    = 'a motto';
+  </script>
 </head>
-<body>
+<body class="tier-asleep">
   <canvas id="atmos"></canvas>
   <div id="root"></div>
-
-  <script type="module" src="sobornost.js"></script>
-  <script type="module" src="game/data.js"></script>
+  <script src="sobornost.js" defer></script>
+  <script src="game.js" defer></script>
 </body>
 </html>
 ```
 
-The engine file must load before your data file. Both use `type="module"`.
+Both scripts use `defer`. The engine file must load before your data file — `defer` preserves document order. Wrap your initial `S.render()` call in a `load` or `DOMContentLoaded` listener to ensure styles are applied before the first paint.
 
 ### Minimal data file
 
 ```js
 const S = window.SOBORNOST;
-
-window.GAME_TITLE  = 'YOUR GAME';
-window.GAME_MOTTO  = 'A subtitle or motto';
 
 S.registerCharisms([
   { id: 'stillness', name: 'Stillness', desc: 'A capacity for quiet.' },
@@ -94,8 +92,24 @@ S.registerScenes({
 });
 
 S.setInitialScene('harbour');
-S.validate(); // remove for production
-S.render();
+S.setModeDescriptions({
+  attended: {
+    name: 'Attended',
+    short: 'You are here. Your choices matter.',
+    long: 'Standard play. All mechanics active. All endings reachable.',
+  },
+  witnessed: {
+    name: 'Witnessed',
+    short: 'The crossing unfolds. You observe.',
+    long: 'Cover challenges resolve automatically. Theosis accrues at 80%. For experienced players.',
+  },
+});
+
+if (document.readyState === 'complete') {
+  requestAnimationFrame(() => S.render());
+} else {
+  window.addEventListener('load', () => requestAnimationFrame(() => S.render()), { once: true });
+}
 ```
 
 ---
@@ -104,29 +118,27 @@ S.render();
 
 ### Scenes
 
-Every scene is a plain object registered with `SOBORNOST.registerScenes({ id: scene, ... })`.
+Every scene is a plain object registered with `S.registerScenes({ id: scene, ... })`.
 
 ```js
 S.registerScenes({
   scene_id: {
-    location: 'Display name shown in the header',
-    mood: 'neutral',          // neutral | tense | uncanny | revelation
-    text: [ ... ],            // array of strings or passage objects
-    choices: [ ... ],         // array of choice objects
-    on_enter: {               // fires on first visit only
-      note: 'note_key',
-      flag: 'flag_id',
-      thought: 'sounding_id',
+    id:           'scene_id',         // must match the key
+    location:     'Display name',     // shown in the header
+    mood:         'neutral',          // neutral | tense | uncanny | revelation
+    text:         `Template literal or plain string`,
+    // OR dynamic:
+    get text() {
+      return S.hasFlag('something') ? 'One thing.' : 'Another thing.';
     },
-    return_to: 'scene_id',    // shows a return link
-    return_label: 'Go back.', // optional label for return link
-    hub: true,                // marks visited choices in hub scenes
-    art: 'art_id',            // ASCII art registered with registerArt()
-    anamnesis: {              // extra line on crossing 2+
-      after: 2,               // index of line after which it appears
-      text: 'Remembered.',
-      note: 'optional_note',
-    },
+    choices:      [ ... ],
+    onEnter:      () => { S.setFlag('visited'); },   // fires on first visit only
+    return_to:    'scene_id',         // renders a persistent return button
+    return_label: 'Go back.',
+    hub:          true,               // marks visited choices
+    art:          'art_id',           // ASCII art block
+    condition:    { type: 'flag', id: 'unlocked' },  // scene only accessible if true
+    _renderOverride: (root) => { /* custom render function */ },
   },
 });
 ```
@@ -138,272 +150,178 @@ S.registerScenes({
   text: 'The choice the player sees.',
 
   // Navigation
-  next: 'scene_id',         // navigate to this scene
-  next: '__new_play__',     // end crossing and start a new one
+  next: 'scene_id',
+  next: '__new_play__',       // end crossing, start new one
 
-  // Effects applied immediately
-  effect: { vigilance: 1, doubt: -1 },
+  // Sounding advancement
+  tags: ['stillness', 'pastoral'],  // advances matching soundings by 1
+
+  // Effects
+  theosis: 5,
+  effect: { vigilance: 1, doubt: -1 },  // deprecated; use individual fields
+  vigilance: 1,
+  composure: -1,
+  communion: 2,
+  doubt: 1,
+
+  // Flags
   set_flag: 'flag_id',
-  set_note: 'note_key',
-  thought: 'sounding_id',   // offer a sounding
-  give_item: 'item_id',
-  take_item: 'item_id',
-  advance_time: 2,           // hours
 
-  // Theosis
-  theosis: 5,                // direct increment
-  tags: ['threshold'],       // looked up in registerTheosisTagValue
+  // Cover
+  set_cover: { key: 'denomination', value: 'Orthodox' },
 
   // Economy
-  mod_reputation: { npc_id: 2 },
-  set_quest_state: { quest_id: 'active' },
-  mod_stance: { npc_id: { trust: 1 } },
-
-  // Epistemic
-  learn: 'fact_id',
+  mod_stance: { npc_id: 'trust', delta: 2 },
   come_to_believe: 'belief_id',
-  contradict: 'belief_id',
+  record_memory:   'what happened here',
+  give_item:       'item_id',
 
   // Companions
-  add_companion: { id: 'companion_id', name: 'Name' },
+  add_companion:    { id: 'companion_id', name: 'Name', stats: { trust: 0 } },
   remove_companion: 'companion_id',
 
   // Deferred
   push_consequence: { delay_scenes: 3, flagsToSet: ['something_follows'] },
-  schedule_event: { triggerTime: { day: 2, hour: 14 }, sceneId: 'event_scene' },
 
   // Access control
-  requires_stat: ['composure', 3],
-  requires_charism: 'charism_id',
-  requires_flag: 'flag_id',
-  requires_playcount: 2,
-  requires_item: 'item_id',
-  requires_theosis: 33,
+  requires_stat:      ['composure', 3],   // [statName, minValue]
+  requires_charism:   'charism_id',
+  requires_flag:      'flag_id',
+  requires_theosis:   33,
+  requires_item:      'item_id',
   requires_companion: 'companion_id',
-  requires_reputation_min: { npc_id: 2 },
-  requires_quest_state: { quest_id: 'completed' },
-  requires_belief: 'belief_id',
-  requires_knowledge: 'fact_id',
-  requires_past_flag: 'flag_from_previous_crossing',
 
-  // Conditional visibility
-  show_if: 'flag_id',
-  hide_if: 'flag_id',
-  once: true,                // hide after the destination is visited
+  // Visibility
+  condition: { type: 'flag', id: 'flag_id' },  // hides if false
+  show_if:   'flag_id',
+  hide_if:   'flag_id',
+  once:      true,   // hide after destination is visited
 
   // Roll
   roll: {
     stat: 'composure',
-    difficulty: 8,
+    difficulty: 11,
     successNext: 'scene_success',
     partialNext: 'scene_partial',
-    failNext: 'scene_fail',
+    failNext:    'scene_fail',
   },
-
-  // Dialogue tree (see Dialogue section)
-  dialogue: [ ... ],
-
-  // Style variants
-  type: 'silence',           // styled as a silence/contemplation choice
-  style: 'cold',             // cold | return | vespers
 }
 ```
 
 ### Stats
 
-The four built-in stats are `vigilance`, `composure`, `communion`, and `doubt`. They live at `G.stats`. The engine does not define what they mean — that is the author's domain. You can rename them conceptually in your own writing, or override the stat tips:
+Four built-in stats: `vigilance`, `composure`, `communion`, `doubt`. All live in `G.stats`. Floor at 0, no ceiling. Access via `S.G.stats.composure` or the engine's `applyEffect`.
 
 ```js
-S.registerStatTip('vigilance', 'Sharpness. Opens investigative choices.');
-S.registerStatTip('doubt',     'Accumulates under pressure.');
+S.applyEffect({ composure: 1, doubt: -1 });
+S.G.stats.vigilance;   // read directly
 ```
-
-Stats floor at 0 and have no ceiling by default.
 
 ### Charisms
 
-Charisms are the player's trait selections — one chosen at the start of each crossing. They gate choices, modify rolls, and can be checked in conditions.
+Selected at crossing start. Gate choices, modify rolls, unlock scenes.
 
 ```js
 S.registerCharisms(
-  [ // sleeping — player picks one at game start
-    { id: 'stillness',   name: 'Stillness',   desc: 'A capacity for quiet.' },
-    { id: 'discernment', name: 'Discernment', desc: 'An eye for what is real.' },
+  [ // sleeping charisms — player picks one per crossing
+    { id: 'penitent',    name: 'Penitent',    desc: 'Carries the weight of things.' },
+    { id: 'witness',     name: 'Witness',     desc: 'Sees without distorting.' },
+    { id: 'prophet',     name: 'Prophet',     desc: 'Speaks what is coming.' },
+    { id: 'rememberer',  name: 'Rememberer',  desc: 'Carries what others forget.' },
   ],
-  [ // waking — unlockable mid-game via registerWakingCharism()
-    { id: 'kenosis', name: 'Kenosis', desc: 'Self-emptying. A waking charism.' },
+  [ // waking charisms — unlocked mid-game via high theosis
+    { id: 'illumined',   name: 'Illumined',   desc: 'Past the second threshold.' },
   ]
 );
 ```
 
-### Soundings
-
-Soundings are contemplations that surface through choices and settle over time. Each sounding has an alignment tag list; choices that share those tags automatically advance matching soundings.
-
-```js
-S.registerSounding('the_shore', {
-  name: 'The Shore',
-  desc: 'The memory of standing at the water\'s edge.',
-  alignmentTags: ['departure', 'threshold'],
-  effect: { communion: 1 },  // applied when the sounding settles
-});
-```
-
-A sounding is offered by a choice: `thought: 'the_shore'`. The player takes it via the Breviary panel. Progress accumulates across 8 scene navigations. The Breviary displays progress and lets the player manage up to 4 active soundings.
-
-### Flags and notes
-
-Flags are boolean markers stored in `G.flags` (a `Set`). They persist across a single crossing and into the next via `G.pastLifeFlags`.
-
-```js
-S.setFlag('met_ferryman');
-S.hasFlag('met_ferryman'); // true
-```
-
-Notes are display labels that accumulate in the Observations panel. Register a label, then add the note from a choice:
-
-```js
-S.registerNote('met_ferryman', 'Met the Ferryman');
-
-// in a choice:
-{ set_note: 'met_ferryman' }
-```
+Charisms compound across crossings. The last waking charism is stored in meta and can unlock specific content on the next crossing.
 
 ---
 
-## Passage system
+## Soundings
 
-Scene text arrays accept passage objects alongside plain strings. All passages resolve to a flat string array before the renderer sees them.
-
-```js
-text: [
-  // Plain string — always shown
-  'The crossing begins here.',
-
-  // Conditional — shown when flag is set
-  { if: 'met_ferryman', text: 'The ferryman has not moved.' },
-
-  // Conditional with else branch
-  { if: 'spoke_honestly',
-    text: 'You feel you have passed something.',
-    else: 'The doubt does not leave.' },
-
-  // Stat gate
-  { if_stat: ['doubt', 3], text: 'Something feels wrong.' },
-
-  // Charism gate
-  { if_charism: 'discernment', text: 'You notice the door is ajar.' },
-
-  // Awareness gate
-  { if_awareness: 2, text: 'A deeper reading of the room.' },
-
-  // Theosis gate
-  { if_theosis: 33, text: 'The {ICON} is near.' },
-
-  // Crossing gate (crossing 2+)
-  { if_playcount: 1, text: 'You have stood here before.' },
-
-  // Belief and knowledge gates
-  { if_belief: 'the_shore_is_real', text: 'It was real.' },
-  { if_knowledge: 'ferryman_name',  text: 'You know his name now.' },
-
-  // Random — picks one line per render (re-rolls each visit)
-  { random: ['Fog.', 'Rain.', 'A thin wind.'] },
-
-  // Weighted random
-  { random: [{ text: 'Rare.', weight: 1 }, { text: 'Common.', weight: 4 }] },
-
-  // Conditional + random combined
-  { if: 'met_ferryman', random: ['He nods.', 'He watches.', 'He waits.'] },
-]
-```
-
-Supported condition keys: `if`, `if_not`, `if_stat`, `if_charism`, `if_awareness`, `if_theosis`, `if_belief`, `if_knowledge`, `if_playcount`.
-
----
-
-## Dialogue trees
-
-A choice with a `dialogue:` array launches an inline dialogue sequence without leaving the scene.
+Soundings are contemplative arcs that settle through sustained aligned choices. Each sounding has alignment tags; choices carrying those tags advance matching active soundings by 1 point.
 
 ```js
-{
-  text: 'Speak to the ferryman.',
-  effect: { communion: 1 },   // applied immediately on click
-  dialogue: [
-    // NPC lines — advance with Continue
-    { speaker: 'Ferryman', text: 'You have been here before.' },
-    { speaker: 'Ferryman', text: 'Many times.' },
-
-    // Narration beat (no speaker)
-    { text: 'The water darkens.' },
-
-    // Player choice node
-    { choices: [
-      {
-        text: '"I don\'t remember."',
-        reply: { speaker: 'Ferryman', text: 'That is how it works.' },
-        effect: { doubt: 1 },
-        set_note: 'spoke_honestly',
-        next: 'aboard',
-      },
-      {
-        text: 'Say nothing.',
-        // No reply — closes dialogue and navigates immediately
-        next: 'aboard',
-      },
-    ]},
+S.registerSounding('sounding_crossing', {
+  id:             'sounding_crossing',
+  alignmentTags:  ['stillness', 'presence', 'crossing'],
+  name:           'On the nature of a crossing',
+  text:           'Short offer text shown in the Breviary.',
+  theosis:        3,         // applied on settle
+  stat:           'composure',
+  statDelta:      1,         // applied on settle
+  settleText: [              // paragraphs shown in the settle overlay
+    'First paragraph.',
+    'Second paragraph.',
   ],
-}
+  settleDesc:     '+1 Composure · +3 Theosis',
+  onSettle:       () => {
+    S.setFlag('sounding_crossing_settled');
+    S.comeToBelieve('crossings_recurse');
+  },
+});
 ```
 
-The scene header and text remain visible during dialogue for spatial context. The dialogue is cleared automatically on any scene navigation.
+**Settlement threshold:** `SOUNDING_THRESHOLD = 6`. A sounding needs 6 aligned choice navigations to settle. Offer a sounding with `S.offerSounding('sounding_id')` from a scene `onEnter`. The player manages active soundings in the Breviary panel.
+
+**Settle overlay:** When a sounding settles, a full-screen overlay renders the `settleText` paragraphs with a fade-in animation. The first paragraph is displayed larger. `settleDesc` appears below a divider as a mechanical summary.
 
 ---
 
-## Endings
+## Theosis
 
-Endings are declared globally and checked after every choice. The highest-priority triggered ending wins; ties break by registration order.
+0–100 spiritual progression. Affects atmosphere, word substitution, waking charism assignment, and what scenes are accessible.
 
 ```js
-S.registerEnding({
-  id: 'dissolution',
-  condition: { type: 'stat', name: 'doubt', min: 8 },
-  scene: 'ending_dissolution',
-  priority: 10,
-});
+S.incrementTheosis(5);
+S.G.theosis;   // read directly
 
-S.registerEnding({
-  id: 'revelation',
-  condition: { type: 'and', conditions: [
-    { type: 'flag', id: 'visited_far_shore' },
-    { type: 'theosis', min: 33 },
-  ]},
-  scene: 'ending_revelation',
-  priority: 20,
-});
+// Tier boundaries (customisable)
+// 0–32: Asleep   33–65: Waking   66–100: Illumined
+
+// Word substitution in scene text
+S.setTheosisTiers([
+  { max: 32,  word: 'icon',  wordPlural: 'icons'  },
+  { max: 65,  word: 'ikon',  wordPlural: 'ikons'  },
+  { max: 100, word: 'Икон', wordPlural: 'Иконы' },
+]);
 ```
 
-Each ending fires at most once per crossing. The condition schema is the same one used for choice locks — `flag`, `stat`, `charism`, `item`, `theosis`, `playcount`, `awareness`, `belief`, `knowledge`, `companion`, `or`, `and`, `not`.
+**Witnessed mode tax:** In Witnessed mode, `incrementTheosis(n)` applies at 80% (ceiling). This is intentional — observation is not transformation.
+
+**Cover/theosis tension:** Roll modifiers can be registered to make cover challenges harder at high theosis. At theosis ≥ 50, cover rolls are −1. At theosis ≥ 70, −2. Register this behaviour:
+
+```js
+S.registerRollModifier('composure',
+  (statKey, options, G) => options.isCoverChallenge && G.theosis >= 50,
+  () => -1
+);
+```
 
 ---
 
 ## Condition schema
 
-Used in endings, choice locks, consequences, and scene pools. Composable:
+Used in ending conditions, choice locks, and scene pools. Fully composable.
 
 ```js
-{ type: 'flag',     id: 'flag_id',        state: true }  // state: false to invert
-{ type: 'stat',     name: 'doubt',        min: 3 }
-{ type: 'charism',  id: 'discernment' }
-{ type: 'item',     id: 'item_id' }
-{ type: 'theosis',  min: 33 }
-{ type: 'awareness',min: 2 }
-{ type: 'playcount',min: 2 }
-{ type: 'belief',   id: 'belief_id' }
-{ type: 'knowledge',id: 'fact_id' }
-{ type: 'companion',id: 'companion_id' }
-{ type: 'past_flag',id: 'flag_from_previous_crossing' }
+{ type: 'flag',      id: 'flag_id',       state: true }   // state: false inverts
+{ type: 'stat',      stat: 'composure',   min: 5 }
+{ type: 'stat',      stat: 'coverIntegrity', min: 3 }
+{ type: 'theosis',   min: 33 }
+{ type: 'charism',   id: 'witness' }
+{ type: 'item',      id: 'item_id' }
+{ type: 'playcount', min: 2 }
+{ type: 'companion', id: 'companion_id' }
+{ type: 'past_flag', id: 'flag_from_previous_crossing' }
+{ type: 'mode',      mode: 'witnessed' }        // NEW: game mode check
+{ type: 'hour',      value: 5 }                 // NEW: exact liturgical hour
+{ type: 'hour_gte',  value: 4 }                 // NEW: hour >= N
+{ type: 'hour_lte',  value: 6 }                 // NEW: hour <= N
+{ type: 'believes',  id: 'belief_id' }          // NEW: comeToBelieve check
+{ type: 'stance',    npc: 'npc_id', key: 'trust', min: 3 }  // NEW: NPC stance
 
 { type: 'and', conditions: [ ... ] }
 { type: 'or',  conditions: [ ... ] }
@@ -412,173 +330,356 @@ Used in endings, choice locks, consequences, and scene pools. Composable:
 
 ---
 
-## Theosis
-
-Theosis is a 0–100 spiritual progression value that affects:
-
-- Canvas atmosphere (gold glow increases with theosis)
-- Word substitution (`{ICON}` in scene text resolves to a tier-dependent word)
-- Name mappings (NPCs or places can shift spelling/script across tiers)
-- Journal threshold entries
-
-```js
-// Register authored journal text for specific thresholds
-S.registerJournalEntry(33, 'The first threshold. The word begins to change.');
-S.registerJournalEntry(66, 'Past the second threshold.');
-S.registerJournalEntry(100, 'There is no word for what you have arrived at.');
-
-// Map theosis gains to choice tags
-S.registerTheosisTagValue('threshold', 5);
-S.registerTheosisTagValue('revelation', 10);
-
-// In a choice:
-{ tags: ['threshold'], next: 'scene' }
-
-// Or directly:
-{ theosis: 5, next: 'scene' }
-
-// Tiered word substitution
-S.setTheosisTiers([
-  { max: 32,  word: 'icon',  wordPlural: 'icons',  cyrillic: null },
-  { max: 65,  word: 'ikon',  wordPlural: 'ikons',  cyrillic: null },
-  { max: 100, word: 'Икон', wordPlural: 'Иконы', cyrillic: 'Икон' },
-]);
-
-// Name mapping (NPC names shift between tiers)
-S.registerNameMapping('Father Thomas', 'Fr. Thomas', 'Thomas', 'Фома');
-```
-
-### Liturgical hours
-
-The liturgical hour determines the scene mood automatically and is visible in journal entries.
-
-```js
-// LITURGICAL_HOURS indices: 0=Lauds, 1=Prime, 2=Terce, 3=Sext, 4=None, 5=Vespers, 6=Compline
-S.setLiturgicalHour(5); // Vespers → revelation mood
-```
-
----
-
-## Save system
-
-Multi-slot localStorage. Autosave fires on every scene navigation.
-
-```js
-S.saveGameSlot('slot1');           // manual save
-S.loadGameSlot('slot1');           // manual load
-S.listSaveSlots();                 // returns ['legacy', 'slot1', ...]
-```
-
-`saveGameLegacy()` / `loadGameLegacy()` are convenience wrappers for the default `'legacy'` slot used by autosave.
-
-**Note:** Consequences with JavaScript function conditions (`condition: () => boolean`) are not save-safe — they are stripped before serialisation with a console warning. Use the condition schema instead.
-
-### What persists
-
-All game-relevant `G` fields are saved and restored. Intentionally transient fields (roll state, panel state, dialogue state, event log) are not saved. The journal is saved to a separate per-slot key and persists across crossings within a slot.
-
----
-
-## Consequence chains
-
-Push deferred consequences from any choice:
-
-```js
-// Fires after the player navigates 3 more scenes
-{ push_consequence: { delay_scenes: 3, flagsToSet: ['something_follows'] } }
-
-// Fires before the player's very next choice
-{ push_consequence: { on_next_choice: true, effect: { doubt: 1 } } }
-
-// Fires when a condition is met (not save-safe — see note above)
-S.pushConsequence({ condition: () => G.stats.doubt >= 5, sceneToRun: 'doubt_scene' });
-```
-
-If a consequence redirects to a new scene, it takes precedence over the choice's own `next` navigation.
-
----
-
 ## Cover system
 
-Cover tracks five fields of a player's adopted identity: `posting`, `background`, `denomination`, `connection`, `left`. Each can be challenged.
+Cover tracks five fields of a player's adopted identity: `posting`, `background`, `denomination`, `connection`, `left`. Each can be challenged independently.
 
 ```js
-// Establish cover via a choice
-{ set_cover: { key: 'denomination', value: 'United Church of Canada' } }
+// Establish a cover field from a choice
+{ set_cover: { key: 'denomination', value: 'Roman Catholic' } }
 
-// Register challenge prompts per field
-S.registerCoverChallenge('denomination', [
-  "You don't sound like one of us.",
-  "Which parish do you attend?",
-]);
+// Read a cover field
+S.G.cover.denomination;    // 'Roman Catholic'
+
+// Start a cover challenge manually
+S.startCoverChallenge('denomination', 11);   // field, difficulty
 ```
 
-The cover challenge is accessed from the status panel. The player rolls Composure against difficulty 8 (increased to 10 if the field is under pressure). Success clears pressure. Partial holds but costs 1 Composure. Failure degrades `coverIntegrity` by 1 and marks the field as pressured.
+**Cover challenge mechanics:** Rolls 2d6 + Composure vs. difficulty (default `BASE_DIFFICULTY = 11`). Success clears pressure on the field. Partial holds but costs 1 Composure and clears pressure. Failure reduces `coverIntegrity` by 1 and marks the field pressured (+3 difficulty on next challenge). Cover integrity restores by 1 when a sounding settles.
+
+**Witnessed mode:** `startCoverChallenge()` returns immediately in Witnessed mode with no roll.
 
 ---
 
-## Validation
-
-Call `SOBORNOST.validate()` at the end of your data file during development. It walks every registered scene and reports dangling scene references, unknown charisms, invalid stat names, missing soundings, and broken ending conditions. Guard or remove it for production.
+## Companions
 
 ```js
-S.setInitialScene('harbour');
-if (typeof DEBUG !== 'undefined') S.validate();
-S.render();
+// Add a companion from a choice
+{ add_companion: { id: 'pavel', name: 'Pavel', stats: { trust: 0 } } }
+
+// Check companion presence
+S.hasCompanion('pavel');
+
+// Modify companion stats
+S.modCompanionStat('pavel', 'trust', 1);
+
+// Register ambient location-specific lines
+S.registerCompanionLine('pavel', {
+  id:       'fo_3',
+  location: 'Foredeck',     // only shows in scenes with this location
+  trustMin: 2,              // requires trust >= 2
+  trustMax: 4,              // optional ceiling
+  once:     false,          // if true, only fires once per crossing
+  condition: { type: 'flag', id: 'anomaly_first_noticed' },
+  text:     'Pavel is at the bow. He turns when he hears you.',
+});
+
+// Retrieve a random eligible line for the current scene
+const line = S.getCompanionLine('pavel', 'Foredeck');
+if (line) parts.push(line);  // inside a get text() function
+
+// Inject a beat into an active dialogue
+// Call from onEnter after S.startDialogue()
+S.injectDialogueBeat(2, { speaker: 'Pavel', text: 'He has a right to know.' });
+// Inserts after beat index 2
+```
+
+Companions are shown in the Status panel with trust dots and their most recent NPC memory.
+
+---
+
+## Roll system
+
+```js
+// Perform a visible roll — returns result object and fires narrative HTML
+const result = S.performVisibleRoll('composure', 11, { isCoverChallenge: true });
+// result.outcome: 'success' | 'partial' | 'failure'
+// result.total: number
+// result.d1, result.d2: individual dice
+
+// Render roll result as inline HTML string
+const html = S.visibleRollHtml(result);
+// Returns: <span class="visible-roll success">[4·6] + 5 = 15 — holds</span>
+
+// Register a roll modifier
+S.registerRollModifier(
+  'composure',
+  (statKey, options, G) => options.isCoverChallenge && G.theosis >= 50,
+  () => -1   // modifier value
+);
 ```
 
 ---
 
-## Hot-reload development
+## Meta-persistence
 
-```bash
-node tools/dev-server.js 3000
-```
-
-Serves your game on port 3000, watches `game/` and `sobornost.js` for changes, and sends a WebSocket signal to the browser on save. Game data files hot-reload without a page refresh — `G` state is preserved. Engine file changes trigger a full page reload.
-
-In your data file:
+Values that survive across crossings are stored in `G.metaUnlocks` (localStorage-backed).
 
 ```js
-S.devMode(3001); // WS port = HTTP port + 1. No-op on non-localhost origins.
+S.unlockMeta('reached_solidarity');   // set a meta flag
+S.hasMeta('reached_solidarity');      // check it
+S.getMetaValue('transmissionCount', 0);  // read with fallback
+
+// Store arbitrary values
+S.G.metaUnlocks.crewVariant = 2;
+S.G.metaUnlocks.transmissionCount = (S.G.metaUnlocks.transmissionCount || 0) + 1;
 ```
 
-Requires Node.js 18+. No `npm install` — uses only Node built-ins.
+`newPlay()` fires a `newPlay` event before resetting game state. Listen to it to read flags from the crossing just ended and store them in meta before the reset:
+
+```js
+S.on('newPlay', () => {
+  if (S.hasFlag('archive_transmitted')) {
+    S.G.metaUnlocks.transmissionCount = (S.G.metaUnlocks.transmissionCount || 0) + 1;
+  }
+});
+```
 
 ---
 
-## Event log
+## Magnetic deviation
 
-In-session only (not persisted). Available in `attended` and `open` play modes via the `log` bottom-nav panel.
+The anomaly system. `G.magneticDeviation` is 0.0–1.0 and drives atmosphere, audio, and visual distortion.
 
 ```js
-S.setLoggedEvents([
-  'flagSet', 'statChanged', 'sceneChanged', 'soundingSettled',
-  'choiceApplied', 'endingTriggered', 'theosisChanged',
-]);
+S.setMagneticDeviation(0.75);
+S.getMagneticDeviation();   // returns current value
 
-S.exportEventLog(); // downloads JSON
+// The engine automatically:
+// - Shows a deviation indicator in the scene header above 0.2
+// - Applies CSS data-deviation="mid"|"high" to the root element
+// - Plays anomaly_pulse SFX on navigation when deviation > 0.5
+// - Introduces Cyrillic character substitution in location text when > 0.75
 ```
+
+---
+
+## Audio
+
+The engine uses the Web Audio API to generate all sounds procedurally. No external audio files required.
+
+```js
+S.toggleAudio();       // on/off; starts ship ambient drone when enabled
+S.playSfx('sounding_settle');   // fire a registered SFX
+
+// Register custom SFX
+S.registerSfx('my_sound', (vol = 0.5) => {
+  if (!_actx) return;
+  const o = _actx.createOscillator();
+  const g = _actx.createGain();
+  g.gain.setValueAtTime(vol, _actx.currentTime);
+  g.gain.exponentialRampToValueAtTime(0.001, _actx.currentTime + 0.8);
+  o.connect(g); g.connect(_gainNode);
+  o.start(); o.stop(_actx.currentTime + 0.9);
+});
+```
+
+**Built-in SFX:** `sounding_settle`, `cover_fail`, `transmission`, `anomaly_drone`, `theosis_moment`, `ship_ambient_start`, `ship_ambient_stop`, `anomaly_pulse`, `radio_static`.
+
+**Ambient system:** `ship_ambient_start` creates a continuous low drone (two detuned sine oscillators + filtered noise). Starts automatically when audio is enabled. `ship_ambient_stop` fades it out over 2 seconds.
+
+**Anomaly pulse:** `anomaly_pulse` fires a sub-bass throb that scales in frequency and volume with `G.magneticDeviation`. Fires automatically on navigation when deviation > 0.5.
+
+---
+
+## Canvas atmosphere
+
+The `#atmos` canvas renders behind all game content. Its mood is driven by scene mood and theosis tier.
+
+```js
+// Toggle canvas on/off (persists in localStorage)
+S.toggleAtmos();
+
+// The canvas adjusts automatically to:
+// - Scene mood (neutral / tense / uncanny / revelation)
+// - Theosis tier (Asleep / Waking / Illumined)
+// - Magnetic deviation (porthole brightness shifts)
+```
+
+For low-end devices or battery concerns, the toggle is rendered as a button in the game UI. On mobile devices where `localStorage` has no prior preference, the canvas defaults to off.
 
 ---
 
 ## Play modes
 
-Three modes affect how locked choices are displayed and which UI elements appear:
+```js
+S.setModeDescriptions({
+  attended:  { name: 'Attended',  short: '...', long: '...' },
+  witnessed: { name: 'Witnessed', short: '...', long: '...' },
+});
+```
 
-| Mode | Locked choices | Composure gains | Log panel |
-|------|---------------|-----------------|-----------|
-| `attended` | shown greyed | allowed | visible |
-| `open` | hidden | allowed | visible |
-| `witnessed` | shown greyed | blocked | hidden |
+| Mode | Cover challenges | Theosis | Description |
+|---|---|---|---|
+| `attended` | Full roll | 100% | Standard play |
+| `witnessed` | Auto-resolve | 80% | Narrative mode |
 
-Set via the mode selection screen, or programmatically: `G.mode = 'attended'`.
+The mode is shown in the mode selection screen before the first crossing. Descriptions are read from `_registries.modeDescriptions`. The `long` description is displayed in the mode button.
+
+---
+
+## Panels
+
+Six bottom-nav panels: `notes` (observations + codex), `status`, `breviary`, `calendar`, `map`, `log`.
+
+Panels render into `document.body` and survive `root.innerHTML = ''`. They are rendered synchronously on button click via `openPanel(id)` to avoid async race conditions.
+
+```js
+S.openPanel('breviary');  // open
+S.openPanel(null);        // close
+```
+
+Panel overlays animate via CSS: `transform: translateX(100%) → translateX(0)` with `.open` class added one frame after render.
+
+---
+
+## Endings
+
+```js
+S.registerEnding({
+  id:        'solidarity',
+  priority:  15,       // highest-priority triggered ending wins
+  condition: { type: 'and', conditions: [
+    { type: 'flag',    id: 'solidarity_sounding_settled' },
+    { type: 'flag',    id: 'mission_refused' },
+    { type: 'theosis', min: 45 },
+  ]},
+  scene:     'ending_solidarity',
+});
+```
+
+Endings are checked after every `applyChoice`. The `crossing_record` scene runs between endings and the next crossing — render it with `_renderOverride`:
+
+```js
+crossing_record: {
+  id: 'crossing_record',
+  text: '',
+  _renderOverride: (root) => { S.renderCrossingRecord(root); },
+  choices: [],
+},
+```
+
+---
+
+## Help screen
+
+```js
+S.renderHelp(document.getElementById('root'));
+```
+
+Renders a full-screen overlay with mechanics reference, keyboard shortcuts, and a high-contrast toggle. Exposed as the `?` button in the game UI.
+
+---
+
+## Save system
+
+Autosave fires on every scene navigation. Multi-slot localStorage.
+
+```js
+S.saveGameSlot('slot1');
+S.loadGameSlot('slot1');
+S.saveGameLegacy();   // saves to 'legacy' slot
+S.loadGameLegacy();
+```
+
+**What persists:** All `G` fields including `G.metaUnlocks`, `G.mode`, `G.audioOn`, `G.flags`, `G.beliefs`, `G.npcStance`, `G.inventory`, `G.companions`. Sets are re-wrapped on load.
+
+**What does not persist:** `G._dialogue`, `G._coverChallenge`, panel state, event log.
+
+---
+
+## Validation
+
+```js
+S.setInitialScene('harbour');
+S.validate();   // logs all dangling refs, unknown IDs, broken conditions
+S.render();
+```
+
+Remove `validate()` in production or guard it with a `DEBUG` check.
+
+---
+
+## Keyboard shortcuts
+
+Built-in keyboard navigation (registered via `_initKeyboard`):
+
+| Key | Action |
+|---|---|
+| `1`–`9` | Activate nth visible choice |
+| `Escape` | Close open panel |
+| `Tab` | Navigate focusable elements |
+| `Enter` / `Space` | Activate focused choice |
+
+---
+
+## Event system
+
+```js
+S.on('flagSet',         flag => { });
+S.on('statChanged',     ({ stat, delta }) => { });
+S.on('sceneChanged',    id => { });
+S.on('soundingSettled', soundingId => { });
+S.on('newPlay',         () => { });
+S.on('doubtCrisis',     ({ doubt }) => { });
+S.on('companionAdded',  ({ id }) => { });
+S.on('codexUnlocked',   id => { });
+```
+
+---
+
+## Ship state
+
+Side-channel state for emergent environmental conditions.
+
+```js
+S.modShipState('paranoia', 2);    // modShipState(key, delta)
+S.getShipState('paranoia');       // returns current value (default 0)
+
+// Automatic CSS class application:
+// paranoia >= 4  → body.ship-paranoid
+// exhaustion >= 5 → body.ship-exhausted
+// morale <= 3    → body.ship-low-morale
+```
+
+---
+
+## NPC stances
+
+```js
+S.modStance('npc_id', 'trust', 2);         // modStance(npc, key, delta)
+S.getStance('npc_id', 'trust');            // returns current value
+S.modReputation('npc_id', 1);             // shorthand for trust
+S.recordNpcMemory('npc_id', 'text');       // stores a memory entry
+```
+
+NPC memories are surfaced in the Status panel and in the crossing record.
+
+---
+
+## Liturgical hours
+
+```js
+// Hours: 0=Lauds 1=Prime 2=Terce 3=Sext 4=None 5=Vespers 6=Compline
+S.setLiturgicalHour(5);   // Vespers
+S.advanceTime(1);          // increments hour
+S.G.liturgicalHour;        // read directly
+
+// Condition gating by hour
+{ type: 'hour_gte', value: 5 }  // only at Vespers or later
+```
+
+---
+
+## Engine version
+
+Current version: **3.4.0**
+
+Accessible at runtime: `SOBORNOST.VERSION`.
 
 ---
 
 ## Single file structure
-
-The `sobornost.js` file contains the complete engine in a single module. The sections are organized by dependency order:
 
 ```
 sobornost.js
@@ -591,36 +692,26 @@ sobornost.js
   public API
 ```
 
-The public API is exposed as `window.SOBORNOST` and includes all registration functions, state access, and rendering controls.
-
 ---
 
 ## Global variables
 
-Set in your HTML or data file before `render()`:
+Set in your HTML `<script>` block before the scripts load:
 
 ```js
-window.GAME_TITLE    = 'YOUR GAME';    // shown on title screen
-window.GAME_SUBTITLE = 'A subtitle';   // shown below title
-window.GAME_MOTTO    = 'A motto.';     // shown in italics
+window.GAME_TITLE    = 'YOUR GAME';
+window.GAME_SUBTITLE = 'a subtitle';
+window.GAME_MOTTO    = 'a motto';
 ```
-
----
-
-## Engine version
-
-Current version: **3.3.1**
-
-Accessible at runtime: `SOBORNOST.VERSION`.
 
 ---
 
 ## Licence
 
-MIT. The engine is free to use, fork, and adapt. Attribution appreciated but not required.
+MIT. Free to use, fork, and adapt. Attribution appreciated but not required.
 
 ---
 
 ## Origin
 
-SOBORNOST was built as the engine for a specific game grounded in contemplative Christian practice, liberation theology, and the phenomenology of institutional work. The mechanics — soundings, theosis, cover, the breviary — reflect that origin. The engine is general enough for any narrative game that takes interiority seriously.
+SOBORNOST was built as the engine for *Spasibo*, a game grounded in contemplative Christian practice, liberation theology, and the phenomenology of institutional work. The mechanics — soundings, theosis, cover, the breviary — reflect that origin. The engine is general enough for any narrative game that takes interiority seriously.
