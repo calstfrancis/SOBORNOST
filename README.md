@@ -1,4 +1,4 @@
-# SOBORNOST
+# SOBORNOST 3.4.0
 
 A browser-based interactive fiction engine for serious narrative games. No build step. No dependencies. Runs natively in any modern browser, deploys directly to GitHub Pages.
 
