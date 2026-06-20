@@ -1,6 +1,6 @@
 // ============================================================
 // SOBORNOST ENGINE — sobornost.js
-// Single-file build. v3.3.1
+// Single-file build. v3.4.0
 // Section order (dependency graph):
 //   debug → events → state → schedule → registries →
 //   mechanics → conditions → soundings → theosis →
@@ -297,7 +297,12 @@ function applyEffect(e) {
   const hasPoa = G.charisms.includes('presence_of_absence');
   for (const [k, v] of Object.entries(e)) {
     if (G.stats[k] !== undefined) {
-      if (k === 'composure' && v > 0 && G.mode === 'witnessed') continue;
+      if (k === 'composure' && v > 0 && G.mode === 'witnessed') {
+        const halved = Math.ceil(v / 2);
+        G.stats.composure = Math.max(0, G.stats.composure + halved);
+        emit('statChanged', { stat: k, delta: halved });
+        continue;
+      }
       if (v < 0 && hasPoa) { if (!G._poaAbsorbedThisScene) { G._poaAbsorbedThisScene = true; showToast('\u2014', 'note'); } continue; }
       G.stats[k] = Math.max(0, G.stats[k] + v);
       emit('statChanged', { stat: k, delta: v });
@@ -486,7 +491,8 @@ function evaluateCondition(cond) {
   if (Array.isArray(cond)) return cond.every(c => evaluateCondition(c));
   switch (cond.type) {
     case 'flag':            return hasFlag(cond.id) === (cond.state !== false);
-    case 'mode':          return G.mode === cond.mode;
+    case 'mode':            return G.mode === cond.mode;
+    case 'reputation':      return getReputation(cond.npc) >= (cond.min || 0);
     case 'stat': {
       // Support both G.stats and special values like coverIntegrity
       let val = 0;
@@ -535,6 +541,21 @@ function isChoiceLocked(ch) {
   if (ch.requires_quest_state) { for (const [id, state] of Object.entries(ch.requires_quest_state)) if (getQuestState(id) !== state) return true; }
   if (ch.requires_belief && !believes(ch.requires_belief)) return true;
   if (ch.requires_knowledge && !knows(ch.requires_knowledge)) return true;
+  return false;
+}
+
+function _conditionHasPastFlag(cond) {
+  if (!cond) return false;
+  if (cond.type === 'past_flag') return true;
+  if (cond.type === 'not') return _conditionHasPastFlag(cond.condition);
+  if ((cond.type === 'and' || cond.type === 'or') && Array.isArray(cond.conditions))
+    return cond.conditions.some(_conditionHasPastFlag);
+  return false;
+}
+
+function isChoicePastFlagLocked(ch) {
+  if (ch.requires_past_flag && !G.pastLifeFlags.has(ch.requires_past_flag)) return true;
+  if (ch.condition && _conditionHasPastFlag(ch.condition) && !evaluateCondition(ch.condition)) return true;
   return false;
 }
 
@@ -1674,7 +1695,8 @@ function renderRitual(root) {
   hdr.appendChild(lb); wrap.appendChild(hdr);
   const body=document.createElement('div'); body.className='game-body';
   if (phase.text) {
-    let raw=Array.isArray(phase.text)?phase.text:[phase.text];
+    const _textVal = typeof phase.text === 'function' ? phase.text() : phase.text;
+    let raw=Array.isArray(_textVal)?_textVal:[_textVal];
     raw=raw.map(applyLinguisticToggle).map(applyPostEventShifts);
     const _ml=injectMicroLines(raw,G.scene); _ml.forEach(line=>{const p=document.createElement('p');p.className='sp';p.innerHTML=processText(injectGhostText(line,G.scene));body.appendChild(p);});
   }
@@ -1691,7 +1713,17 @@ function renderRitual(root) {
   } else if (phase.choices) {
     phase.choices.forEach(ch=>{
       const btn=document.createElement('button');btn.className='choice';btn.textContent=processText(ch.text);
-      btn.onclick=()=>{if(ch.effect)applyEffect(ch.effect);if(ch.set_flag)setFlag(ch.set_flag);ritualNextPhase();};
+      btn.onclick=()=>{
+        if(ch.effect)applyEffect(ch.effect);
+        if(ch.set_flag)setFlag(ch.set_flag);
+        if(ch.theosis)incrementTheosis(ch.theosis);
+        if(ch.composure)applyEffect({composure:ch.composure});
+        if(ch.communion)applyEffect({communion:ch.communion});
+        if(ch.come_to_believe)comeToBelieve(ch.come_to_believe);
+        if(ch.tags&&G.soundings)ch.tags.forEach(tag=>progressSoundingsByTag&&progressSoundingsByTag(tag));
+        _activeRitual.choicesMade.push({phase:_activeRitual.phaseIndex,choice:ch.text});
+        ritualNextPhase();
+      };
       cd.appendChild(btn);
     });
   } else {
@@ -2409,22 +2441,51 @@ function injectMicroLines(lines, sceneId) {
   return [...lines, `<span class="micro-line">${micro}</span>`];
 }
 const _toggleMemo = new Map();
+// Per-theosis-tier word substitution table (beyond the ship name)
+const _THEOSIS_WORDS = {
+  // [asleep_word, waking_word, illumined_word]
+  'the mission':   ['the mission',   'the crossing',    'the pilgrimage'],
+  'the archive':   ['the archive',   'the record',      'the witness'],
+  'the anomaly':   ['the anomaly',   'the field',       'что отвечает'],
+  'the cover':     ['the cover',     'the performance', 'the mask'],
+  'the instrument room': ['the instrument room', 'the measuring room', 'the listening room'],
+};
+
 function applyLinguisticToggle(t){
   const doubt = G.stats.doubt || 0;
-  if (doubt < 4 || !_registries.translations || !Object.keys(_registries.translations).length) return t;
-  // Memoize per scene+doubt-tier to prevent per-render flickering
-  const tier = doubt >= 7 ? 'H' : doubt >= 5 ? 'M' : 'L';
-  const key = G.scene + '|' + tier + '|' + t.slice(0, 32);
-  if (_toggleMemo.has(key)) return _toggleMemo.get(key);
-  const flicker = tier === 'H' ? 0.35 : tier === 'M' ? 0.18 : 0.08;
+  const theosis = G.theosis || 0;
+  const theoTier = theosis >= 66 ? 2 : theosis >= 33 ? 1 : 0;
+  const memoKey = G.scene + '|d' + doubt + '|t' + theoTier + '|' + t.slice(0, 32);
+  if (_toggleMemo.has(memoKey)) return _toggleMemo.get(memoKey);
+
   let result = t;
-  for (const [orig, trans] of Object.entries(_registries.translations)) {
-    if (Math.random() < flicker) {
-      result = result.replaceAll(orig, `<span class="cyrillic-flicker" title="${orig}">${trans}</span>`);
+
+  // Theosis word shifts — deterministic, no flicker
+  if (theoTier > 0) {
+    for (const [orig, variants] of Object.entries(_THEOSIS_WORDS)) {
+      const replacement = variants[theoTier];
+      if (replacement !== orig) {
+        result = result.replaceAll(orig, replacement);
+        // Also try capitalised
+        const cap = orig.charAt(0).toUpperCase() + orig.slice(1);
+        const capRep = replacement.charAt(0).toUpperCase() + replacement.slice(1);
+        result = result.replaceAll(cap, capRep);
+      }
     }
   }
-  _toggleMemo.set(key, result);
-  // Expire memo on scene change
+
+  // Doubt Cyrillic flicker — probabilistic
+  if (doubt >= 4 && _registries.translations && Object.keys(_registries.translations).length) {
+    const tier = doubt >= 7 ? 'H' : doubt >= 5 ? 'M' : 'L';
+    const flicker = tier === 'H' ? 0.35 : tier === 'M' ? 0.18 : 0.08;
+    for (const [orig, trans] of Object.entries(_registries.translations)) {
+      if (Math.random() < flicker) {
+        result = result.replaceAll(orig, `<span class="cyrillic-flicker" title="${orig}">${trans}</span>`);
+      }
+    }
+  }
+
+  _toggleMemo.set(memoKey, result);
   return result;
 }
 // Clear memo on navigation
@@ -2897,11 +2958,12 @@ function renderGame(root){
   const cd=document.createElement('div');cd.className='choices';
   if(scene.return_to){const rb=document.createElement('button');rb.className='choice choice-return';rb.textContent=scene.return_label||'Return.';rb.onclick=()=>{_lastScrolledScene=null;navigate(scene.return_to);};cd.appendChild(rb);}
   if(scene.choices){
-    let _choiceIdx=0;
+    let _choiceIdx=0;let _hasPastFlagLocked=false;
     scene.choices.forEach(ch=>{
       if(ch.hide_if&&hasFlag(ch.hide_if))return;if(ch.show_if&&!hasFlag(ch.show_if))return;if(ch.once&&ch.next&&hasFlag('visited_'+ch.next))return;
       const btn=document.createElement('button');const locked=isChoiceLocked(ch);
       if(locked){
+        if(isChoicePastFlagLocked(ch))_hasPastFlagLocked=true;
         if(G.mode==='open')return;btn.className='choice choice-locked';btn.disabled=true;
         let hint=processText(ch.text);
         if(ch.requires_stat)hint+=` [${ch.requires_stat[0]} ${ch.requires_stat[1]}+]`;if(ch.requires_charism)hint+=` [charism: ${ch.requires_charism}]`;
@@ -2929,6 +2991,11 @@ function renderGame(root){
       }
       cd.appendChild(btn);
     });
+    if(_hasPastFlagLocked&&G.mode!=='open'){
+      const note=document.createElement('p');note.className='past-flag-note';
+      note.textContent='Some things will only be visible after another crossing.';
+      cd.appendChild(note);
+    }
   }
   body.appendChild(cd);
   body.appendChild(_buildRestartBar());wrap.appendChild(body);root.appendChild(wrap);
@@ -3605,12 +3672,39 @@ function renderCrossingRecord(root) {
   screen.className = 'crossing-record';
 
   // Ending title
+  // Passenger crossing — sparse record
+  if (G.flags.has('crossing_was_passenger_crossing')) {
+    screen.className = 'crossing-record crossing-record-passenger';
+    const emptyTitle = document.createElement('div');
+    emptyTitle.className = 'cr-ending-title cr-passenger-title';
+    emptyTitle.textContent = 'THE PASSENGER';
+    screen.appendChild(emptyTitle);
+    const emptyDesc = document.createElement('div');
+    emptyDesc.className = 'cr-ending-desc';
+    emptyDesc.textContent = 'You were here.';
+    screen.appendChild(emptyDesc);
+    const emptyDiv = document.createElement('div'); emptyDiv.className = 'cr-divider'; screen.appendChild(emptyDiv);
+    // Blank panels — visible absence
+    ['Settled this crossing', 'What the ship remembers', 'Theosis'].forEach(label => {
+      const sec = document.createElement('div'); sec.className = 'cr-section cr-section-empty'; sec.textContent = label; screen.appendChild(sec);
+      const blank = document.createElement('div'); blank.className = 'cr-row cr-row-empty'; blank.textContent = '—'; screen.appendChild(blank);
+    });
+    const finalDiv = document.createElement('div'); finalDiv.className = 'cr-divider'; screen.appendChild(finalDiv);
+    // Haircut's name without text
+    const hairEl = document.createElement('div'); hairEl.className = 'cr-memory cr-memory-haircut';
+    const npcSpan = document.createElement('span'); npcSpan.className = 'cr-memory-npc'; npcSpan.textContent = 'Haircut';
+    hairEl.appendChild(npcSpan); screen.appendChild(hairEl);
+    const btn2 = document.createElement('button'); btn2.className = 'btn cr-btn'; btn2.textContent = 'Begin again.'; btn2.onclick = () => newPlay(); screen.appendChild(btn2);
+    root.appendChild(screen); return;
+  }
+
   const endingNames = {
     ending_erasure_reached:     ['ERASURE',     'The archive is gone.'],
     ending_witness_reached:     ['WITNESS',     'The archive is hidden.'],
     ending_restoration_reached: ['RESTORATION', 'The record goes into the world.'],
     ending_solidarity_reached:  ['SOLIDARITY',  'The ship acted as one body.'],
     ending_the_knowing_reached: ['THE KNOWING', 'You have been here before.'],
+    ending_passenger_reached:   ['THE PASSENGER', 'You were here.'],
   };
   let endingTitle = 'THE CROSSING', endingDesc = '';
   for (const [flag, [title, desc]] of Object.entries(endingNames)) {
